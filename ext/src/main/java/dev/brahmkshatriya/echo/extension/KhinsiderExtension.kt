@@ -112,15 +112,16 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
 
     // ---------- Risoluzione audio ----------
     // L'URL della traccia è una pagina khinsider: bisogna scaricarla
-    // e cercare dentro il link MP3 vero (su vgmtreasurechest.com).
+    // e cercare dentro il link vero (MP3 o FLAC) su vgmtreasurechest.com.
 
-    private suspend fun resolveAudio(pageUrl: String): String {
+    private suspend fun resolveAudio(pageUrl: String, format: String = "mp3"): String {
         val html = getText(downloadUrl(pageUrl))
-        val regex = Regex("href=[\"']([^\"']+\\.mp3)[\"']", RegexOption.IGNORE_CASE)
+        val ext = if (format.equals("flac", true)) "flac" else "mp3"
+        val regex = Regex("href=[\"']([^\"']+\\.$ext)[\"']", RegexOption.IGNORE_CASE)
         val candidates = regex.findAll(html).map { it.groupValues[1] }.toList()
         val link = candidates.firstOrNull { it.contains("vgmtreasurechest.com") }
             ?: candidates.firstOrNull()
-            ?: throw Exception("Link MP3 non trovato nella pagina")
+            ?: throw Exception("Link $ext non trovato nella pagina")
         return if (link.startsWith("http")) link else "https://downloads.khinsider.com$link"
     }
 
@@ -163,12 +164,22 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
             listOf(Artist(id = it, name = it))
         } ?: emptyList()
         val albumModel = Album(id = album.id, title = albumTitle, cover = cover)
+        val hasFlac = runCatching {
+            this["availableFormats"]?.jsonArray?.any {
+                it.jsonPrimitive.content.equals("flac", true)
+            }
+        }.getOrDefault(false)
         val tracks = runCatching { this["tracks"]?.jsonArray }.getOrNull() ?: return emptyList()
         return tracks.mapNotNull { item ->
             val o = item.jsonObject
             val title = o.str("title") ?: return@mapNotNull null
             val pageUrl = o.str("url") ?: return@mapNotNull null
             val quality = qualityOf(o.str("bitrate"))
+            val streamables = listOf(
+                Streamable.server(id = pageUrl, quality = quality, title = "MP3")
+            ) + if (hasFlac) {
+                listOf(Streamable.server(id = "$pageUrl#flac", quality = 7, title = "FLAC"))
+            } else emptyList()
             Track(
                 id = pageUrl,
                 title = title,
@@ -177,9 +188,7 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
                 cover = cover,
                 duration = parseDuration(o.str("duration")),
                 albumOrderNumber = o.str("number")?.toLongOrNull(),
-                streamables = listOf(
-                    Streamable.server(id = pageUrl, quality = quality, title = "MP3")
-                )
+                streamables = streamables
             )
         }
     }
@@ -246,8 +255,15 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
     override suspend fun loadStreamableMedia(
         streamable: Streamable, isDownload: Boolean,
     ): Streamable.Media {
-        val pageUrl = URLDecoder.decode(streamable.id, "UTF-8")
-        val direct = audioCache[pageUrl] ?: resolveAudio(pageUrl).also { audioCache[pageUrl] = it }
+        val decoded = URLDecoder.decode(streamable.id, "UTF-8")
+        val isFlac = decoded.endsWith("#flac")
+        val pageUrl = if (isFlac) decoded.removeSuffix("#flac") else decoded
+        val cacheKey = if (isFlac) "$pageUrl#flac" else pageUrl
+        val direct = audioCache[cacheKey] ?: runCatching {
+            resolveAudio(pageUrl, if (isFlac) "flac" else "mp3")
+        }.getOrElse {
+            if (isFlac) resolveAudio(pageUrl, "mp3") else throw it
+        }.also { audioCache[cacheKey] = it }
         return downloadUrl(direct).toServerMedia()
     }
 
