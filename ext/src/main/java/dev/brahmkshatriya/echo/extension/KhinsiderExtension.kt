@@ -9,6 +9,7 @@ import dev.brahmkshatriya.echo.common.clients.SearchFeedClient
 import dev.brahmkshatriya.echo.common.clients.TrackClient
 import dev.brahmkshatriya.echo.common.helpers.ClientException
 import dev.brahmkshatriya.echo.common.helpers.ContinuationCallback.Companion.await
+import dev.brahmkshatriya.echo.common.helpers.Page
 import dev.brahmkshatriya.echo.common.helpers.PagedData
 import dev.brahmkshatriya.echo.common.helpers.WebViewRequest
 import dev.brahmkshatriya.echo.common.models.Album
@@ -280,12 +281,12 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
     }
 
     /** Paginazione di Echo 1.0: Continuous carica le pagine una dopo l'altra */
-    private fun <T> continuousPaged(
+        private fun <T : Any> continuousPaged(
         loader: suspend (page: Int) -> Pair<List<T>, Boolean>,
     ): PagedData<T> = PagedData.Continuous { key ->
         val page = key?.toIntOrNull() ?: 1
         val (items, hasMore) = loader(page)
-        items to if (hasMore) (page + 1).toString() else null
+        Page(items, if (hasMore) (page + 1).toString() else null)
     }
 
     /** Pagina "More" di una console/tipo: una sezione per ogni pagina del sito */
