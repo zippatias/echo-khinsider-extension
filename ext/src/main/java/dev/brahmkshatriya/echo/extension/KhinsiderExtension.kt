@@ -383,7 +383,7 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
         override val dontCache = true
         override val initialUrl = "https://downloads.khinsider.com/forums/login".toGetRequest()
         // Si ferma quando lasciamo la pagina di login (login completato o reindirizzato)
-        override val stopUrlRegex = Regex("""https://downloads\.khinsider\.com/(?!forums/login(?:\?|/|$)).*""")
+        override val stopUrlRegex = Regex("""https://downloads\.khinsider\.com/(?!.*login).*""")
         override suspend fun onStop(url: NetworkRequest, cookie: String): List<User> {
             val loggedIn = verifySession(cookie)
             if (!loggedIn) {
@@ -402,7 +402,7 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
     }
 
     /** Verifica reale: /cp/favorites risponde 200 solo se loggati (302 = reindirizzato al login) */
-        private suspend fun verifySession(cookie: String): Boolean = runCatching {
+    private suspend fun verifySession(cookie: String): Boolean = runCatching {
         val request = Request.Builder()
             .url("https://downloads.khinsider.com/cp/favorites")
             .header("User-Agent", "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/120.0 Mobile Safari/537.36")
@@ -410,8 +410,9 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
             .build()
         val response = noRedirectClient.newCall(request).await()
         val code = response.code
+        val body = response.body?.string() ?: ""
         response.close()
-        code == 200
+        code == 200 && !body.contains("/forums/login") && !body.contains(">Log In")
     }.getOrDefault(false)
 
     override fun setLoginUser(user: User?) {
@@ -424,7 +425,7 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
     // ---------- LIBRERIA ----------
 
     override suspend fun loadLibraryFeed(): Feed<Shelf> {
-        if (cookie == null) throw ClientException.LoginRequired()
+        if (cookie == null) return emptyList<Shelf>().toFeed()
         return Feed(emptyList()) {
             PagedData.Single {
                 listOfNotNull(
