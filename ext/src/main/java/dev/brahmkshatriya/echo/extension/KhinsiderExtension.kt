@@ -13,7 +13,6 @@ import dev.brahmkshatriya.echo.common.models.Feed
 import dev.brahmkshatriya.echo.common.models.Feed.Companion.toFeed
 import dev.brahmkshatriya.echo.common.models.Feed.Companion.toFeedData
 import dev.brahmkshatriya.echo.common.models.ImageHolder.Companion.toImageHolder
-import dev.brahmkshatriya.echo.common.models.NetworkRequest.Companion.toGetRequest
 import dev.brahmkshatriya.echo.common.models.Shelf
 import dev.brahmkshatriya.echo.common.models.Streamable
 import dev.brahmkshatriya.echo.common.models.Streamable.Media.Companion.toServerMedia
@@ -220,7 +219,7 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
 
     override suspend fun loadStreamableMedia(
         streamable: Streamable, isDownload: Boolean,
-    ): Streamable.Media = downloadUrl(streamable.id).toGetRequest().toServerMedia()
+    ): Streamable.Media = downloadUrl(streamable.id).toServerMedia()
 
     override suspend fun loadFeed(track: Track): Feed<Shelf> = emptyList<Shelf>().toFeed()
 }
