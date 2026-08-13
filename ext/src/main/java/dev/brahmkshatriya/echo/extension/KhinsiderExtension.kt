@@ -71,9 +71,10 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
         return response.body?.string() ?: throw Exception("Risposta vuota")
     }
 
-    private fun imageUrl(raw: String?): String? {
+        private fun imageUrl(raw: String?): String? {
         if (raw.isNullOrBlank()) return null
-        return apiUrl("/api/image", mapOf("url" to raw))
+        val target = raw.replace("/thumbs_small/", "/thumbs/")
+        return apiUrl("/api/image", mapOf("url" to target))
     }
 
     private fun downloadUrl(target: String): String =
