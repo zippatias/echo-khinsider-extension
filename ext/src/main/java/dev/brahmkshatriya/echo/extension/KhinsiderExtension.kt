@@ -54,7 +54,8 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
     private val noRedirectClient = OkHttpClient.Builder().followRedirects(false).build()
     private lateinit var setting: Settings
     private val audioCache = mutableMapOf<String, String>()
-    private val coverCache = mutableMapOf<String, String>()   // albumId -> URL copertina media
+    private val coverCache = mutableMapOf<String, String>()          // albumId -> URL copertina media
+    private val coverEnrichLimit = 30                                 // max copertine dal mirror per scaffale
     private val UA = "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/120.0 Mobile Safari/537.36"
 
     override suspend fun getSettingItems(): List<Setting> = emptyList()
@@ -89,9 +90,15 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
         return response.body?.string() ?: throw Exception("Risposta vuota")
     }
 
+    /** Converte qualsiasi URL di immagine nella variante MEDIA (/thumbs/), passando dal proxy del mirror. */
     private fun imageUrl(raw: String?): String? {
         if (raw.isNullOrBlank()) return null
-        val target = raw.replace("/thumbs_small/", "/thumbs/")   // piccola -> media
+        val target = when {
+            raw.contains("/thumbs_small/") -> raw.replace("/thumbs_small/", "/thumbs/")
+            raw.contains("/thumbs/") -> raw
+            // cover a piena risoluzione: inserisce /thumbs/ dopo lo slug
+            else -> Regex("""(soundtracks/[^/]+)/""").replace(raw, "$1/thumbs/")
+        }
         return apiUrl("/api/image", mapOf("url" to target))
     }
 
@@ -292,12 +299,8 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
         }
         val cover = runCatching {
             val json = getJson(apiUrl("/api/album", mapOf("url" to id))).jsonObject
-            // imagesThumbs è già in formato medio (/thumbs/). Fallback: coverUrl
-            // a piena risoluzione, in cui inseriamo "/thumbs/" dopo lo slug.
             json["imagesThumbs"]?.jsonArray?.firstOrNull()?.jsonPrimitive?.content
-                ?: json["coverUrl"]?.jsonPrimitive?.content?.let {
-                    Regex("""(soundtracks/[^/]+)/""").replace(it, "$1/thumbs/")
-                }
+                ?: json["coverUrl"]?.jsonPrimitive?.content
         }.getOrNull()
         synchronized(coverCache) {
             coverCache[id] = cover ?: ""
@@ -307,25 +310,35 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
 
     /**
      * Completa le copertine mancanti usando il mirror API, con richieste in parallelo
-     * (a gruppi di 6). Se tutte le copertine ci sono già, non fa nessuna richiesta.
+     * (a gruppi di 6) su Dispatchers.Default per non bloccare la UI. Limitato a
+     * `coverEnrichLimit` album per chiamata, così il primo caricamento resta veloce.
      */
     private suspend fun enrichWithCovers(albums: List<Album>): List<Album> {
-        if (albums.none { it.cover == null }) return albums
-        return coroutineScope {
-            albums.chunked(6).flatMap { chunk ->
-                chunk.map { album ->
-                    async {
-                        if (album.cover != null) album
-                        else coverFromApi(album.id)?.let { url ->
-                            album.copy(cover = imageUrl(url)?.toImageHolder())
-                        } ?: album
-                    }
-                }.awaitAll()
+        val missing = albums.filter { it.cover == null }.take(coverEnrichLimit)
+        if (missing.isEmpty()) return albums
+        return withContext(Dispatchers.Default) {
+            coroutineScope {
+                val enriched = missing.chunked(6).flatMap { chunk ->
+                    chunk.map { album ->
+                        async {
+                            coverFromApi(album.id)?.let { url ->
+                                album.copy(cover = imageUrl(url)?.toImageHolder())
+                            } ?: album
+                        }
+                    }.awaitAll()
+                }
+                val byId = enriched.associateBy { it.id }
+                albums.map { byId[it.id] ?: it }
             }
         }
     }
 
-    private suspend fun scrapeAlbumList(url: String, limit: Int = 30, cookie: String? = null): List<Album> {
+    private suspend fun scrapeAlbumList(
+        url: String,
+        limit: Int = 30,
+        cookie: String? = null,
+        skipFirst: Int = 0,
+    ): List<Album> {
         val html = runCatching { khinsiderGet(url, cookie) }.getOrDefault("")
         val albums = LinkedHashMap<String, Album>()   // niente duplicati
         for (match in albumLinkRegex.findAll(html)) {
@@ -346,10 +359,12 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
                 cover = cover?.let { imageUrl(it)?.toImageHolder() },
             )
 
-            if (albums.size >= limit) break
+            if (albums.size >= skipFirst + limit) break
         }
+        val list = albums.values.toList()
+        val result = if (skipFirst > 0) list.drop(skipFirst) else list
         // Le pagine "Top 100..." non hanno immagini: le prendiamo dal mirror API.
-        return enrichWithCovers(albums.values.toList())
+        return enrichWithCovers(result)
     }
 
     /** Paginazione di Echo 1.0: Continuous carica le pagine una dopo l'altra */
@@ -393,13 +408,65 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
         )
     }
 
+    // ---------- CONSOLE (Top 12 + elenco paginato senza la Top 12) ----------
+
+    /** Le due sezioni di una console: "Top 12 X Albums" e l'elenco completo dal 13° album. */
+    private suspend fun consoleShelves(name: String, path: String): List<Shelf> {
+        val all = runCatching { scrapeAlbumList("$KHI$path", 12 + 30, null, 0) }.getOrDefault(emptyList())
+        if (all.isEmpty()) return emptyList()
+        val top12 = all.take(12)
+        val rest = all.drop(12).take(30)
+        val topShelf = Shelf.Lists.Items(
+            id = "console_${path.substringAfterLast('/')}_top",
+            title = "Top 12 $name Albums",
+            list = top12,
+        )
+        val restShelf = if (rest.isEmpty()) null
+        else Shelf.Lists.Items(
+            id = "console_${path.substringAfterLast('/')}_albums",
+            title = name,
+            list = rest,
+            more = consoleMoreFeed(path),
+        )
+        return listOfNotNull(topShelf, restShelf)
+    }
+
+    /**
+     * Pagine "More" di una console: chunk da 30 album DENTRO ogni pagina del sito,
+     * saltando la Top 12. La chiave è "paginaSito_offset" (es. "1_42", "2_0"):
+     * la prima pagina "More" riparte dal 43° album (dopo i 30 già mostrati).
+     */
+    private fun consoleMoreFeed(path: String): Feed<Shelf> =
+        Feed(emptyList()) {
+            PagedData.Continuous { key ->
+                val parts = key?.split("_") ?: listOf("1", "42")
+                val sitePage = parts[0].toIntOrNull() ?: 1
+                val offset = parts.getOrNull(1)?.toIntOrNull() ?: 0
+                val url = if (sitePage == 1) "$KHI$path" else "$KHI$path?page=$sitePage"
+                val items = scrapeAlbumList(url, 30, null, offset)
+                val next = when {
+                    items.size >= 30 -> "$sitePage_${offset + 30}"
+                    items.isNotEmpty() -> "${sitePage + 1}_0"
+                    else -> null
+                }
+                val shelves = if (items.isEmpty()) emptyList()
+                else listOf(
+                    Shelf.Lists.Items(
+                        id = "console-${path.substringAfterLast('/')}-p$sitePage-$offset",
+                        title = "Pagina",
+                        list = items,
+                    )
+                )
+                shelves to (next != null || shelves.isNotEmpty())
+            }.toFeedData()
+        }
+
     /** Le 24 console caricate a gruppi di 8 (scroll infinito tra le console) */
     private fun pagedConsoleShelves(): PagedData<Shelf> = continuousPaged { page ->
         val start = (page - 1) * 8
         val end = minOf(start + 8, platforms.size)
-        val shelves = platforms.subList(start, end).mapNotNull { (name, path) ->
-            runCatching { albumsShelf("console_${path.substringAfterLast('/')}", name, path, 12, paged = true) }
-                .getOrNull()
+        val shelves = platforms.subList(start, end).flatMap { (name, path) ->
+            runCatching { consoleShelves(name, path) }.getOrDefault(emptyList())
         }
         shelves to (end < platforms.size)
     }
@@ -643,18 +710,20 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
 
     // ---------- Album ----------
 
-    private var cacheAlbumId: String? = null
-    private var cacheAlbumJson: JsonObject? = null
+    // Cache LRU (max 20 album) dei metadati: evita di riscaricare l'album
+    // a ogni tap quando si alternano pochi album di fila.
+    private val albumMetaCache = object : LinkedHashMap<String, JsonObject>(16, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, JsonObject>?): Boolean = size > 20
+    }
 
     private suspend fun albumMeta(id: String): JsonObject {
-        if (cacheAlbumId == id && cacheAlbumJson != null) return cacheAlbumJson!!
+        synchronized(albumMetaCache) { albumMetaCache[id]?.let { return it } }
         val json = runCatching {
             getJson(apiUrl("/api/album", mapOf("url" to id))).jsonObject
         }.getOrElse {
             buildJsonObject { put("name", "") }
         }
-        cacheAlbumId = id
-        cacheAlbumJson = json
+        synchronized(albumMetaCache) { albumMetaCache[id] = json }
         return json
     }
 
