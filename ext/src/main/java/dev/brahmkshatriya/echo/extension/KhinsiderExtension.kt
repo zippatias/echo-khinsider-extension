@@ -30,12 +30,14 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import java.net.URLDecoder
 import java.net.URLEncoder
 
 class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, AlbumClient, TrackClient, LibraryFeedClient {
 
     private val client = OkHttpClient()
     private lateinit var setting: Settings
+    private val audioCache = mutableMapOf<String, String>()
 
     override suspend fun getSettingItems(): List<Setting> = emptyList()
 
@@ -62,13 +64,20 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
         return Json.parseToJsonElement(body)
     }
 
+    private suspend fun getText(url: String): String {
+        val request = Request.Builder().url(url).build()
+        val response = client.newCall(request).await()
+        if (!response.isSuccessful) throw Exception("HTTP ${response.code}")
+        return response.body?.string() ?: throw Exception("Risposta vuota")
+    }
+
     private fun imageUrl(raw: String?): String? {
         if (raw.isNullOrBlank()) return null
         return apiUrl("/api/image", mapOf("url" to raw))
     }
 
-    private fun downloadUrl(mp3: String): String =
-        apiUrl("/api/download", mapOf("url" to mp3))
+    private fun downloadUrl(target: String): String =
+        apiUrl("/api/download", mapOf("url" to target))
 
     // ---------- Helper JSON ----------
 
@@ -99,6 +108,20 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
             kbps >= 128 -> 3
             else -> 0
         }
+    }
+
+    // ---------- Risoluzione audio ----------
+    // L'URL della traccia è una pagina khinsider: bisogna scaricarla
+    // e cercare dentro il link MP3 vero (su vgmtreasurechest.com).
+
+    private suspend fun resolveAudio(pageUrl: String): String {
+        val html = getText(downloadUrl(pageUrl))
+        val regex = Regex("href=[\"']([^\"']+\\.mp3)[\"']", RegexOption.IGNORE_CASE)
+        val candidates = regex.findAll(html).map { it.groupValues[1] }.toList()
+        val link = candidates.firstOrNull { it.contains("vgmtreasurechest.com") }
+            ?: candidates.firstOrNull()
+            ?: throw Exception("Link MP3 non trovato nella pagina")
+        return if (link.startsWith("http")) link else "https://downloads.khinsider.com$link"
     }
 
     // ---------- Conversione modelli ----------
@@ -144,10 +167,10 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
         return tracks.mapNotNull { item ->
             val o = item.jsonObject
             val title = o.str("title") ?: return@mapNotNull null
-            val mp3 = o.str("url") ?: return@mapNotNull null
+            val pageUrl = o.str("url") ?: return@mapNotNull null
             val quality = qualityOf(o.str("bitrate"))
             Track(
-                id = mp3,
+                id = pageUrl,
                 title = title,
                 artists = artists,
                 album = albumModel,
@@ -155,7 +178,7 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
                 duration = parseDuration(o.str("duration")),
                 albumOrderNumber = o.str("number")?.toLongOrNull(),
                 streamables = listOf(
-                    Streamable.server(id = mp3, quality = quality, title = "MP3")
+                    Streamable.server(id = pageUrl, quality = quality, title = "MP3")
                 )
             )
         }
@@ -173,6 +196,7 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
     }
 
     override suspend fun loadHomeFeed(): Feed<Shelf> = latestShelves().toFeed()
+
     override suspend fun loadLibraryFeed(): Feed<Shelf> = emptyList<Shelf>().toFeed()
 
     // ---------- Ricerca ----------
@@ -221,7 +245,11 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
 
     override suspend fun loadStreamableMedia(
         streamable: Streamable, isDownload: Boolean,
-    ): Streamable.Media = downloadUrl(streamable.id).toServerMedia()
+    ): Streamable.Media {
+        val pageUrl = URLDecoder.decode(streamable.id, "UTF-8")
+        val direct = audioCache[pageUrl] ?: resolveAudio(pageUrl).also { audioCache[pageUrl] = it }
+        return downloadUrl(direct).toServerMedia()
+    }
 
     override suspend fun loadFeed(track: Track): Feed<Shelf> = emptyList<Shelf>().toFeed()
 }
