@@ -30,6 +30,8 @@ import dev.brahmkshatriya.echo.common.models.Track
 import dev.brahmkshatriya.echo.common.models.User
 import dev.brahmkshatriya.echo.common.settings.Setting
 import dev.brahmkshatriya.echo.common.settings.Settings
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
@@ -272,7 +274,7 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
                 .replace("&#39;", "'").replace("&lt;", "<").replace("&gt;", ">")
             val cover = Regex("""<img[^>]+src="([^"]+)"[^>]*>""").find(inner)?.groupValues?.get(1)
                 ?.let { if (it.startsWith("http")) it else "$KHI$it" }
-                albums[slug] = Album(
+            albums[slug] = Album(
                 id = "/game-soundtracks/album/$slug",
                 title = title.ifBlank { slug.replace('-', ' ') },
                 cover = cover?.let { imageUrl(it)?.toImageHolder() },
@@ -284,7 +286,7 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
     }
 
     /** Paginazione di Echo 1.0: Continuous carica le pagine una dopo l'altra */
-        private fun <T : Any> continuousPaged(
+    private fun <T : Any> continuousPaged(
         loader: suspend (page: Int) -> Pair<List<T>, Boolean>,
     ): PagedData<T> = PagedData.Continuous { key ->
         val page = key?.toIntOrNull() ?: 1
@@ -386,12 +388,15 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
         // così dopo un login riuscito il WebView finisce su una pagina che esiste solo
         // da autenticati e il flusso si ferma SOLO a login davvero completato.
         override val initialUrl =
-        "https://downloads.khinsider.com/forums/login?redirect=%2Fcp%2Ffavorites"
-            .toGetRequest(mapOf("User-Agent" to UA))
+            "https://downloads.khinsider.com/forums/login?redirect=%2Fcp%2Ffavorites"
+                .toGetRequest(mapOf("User-Agent" to UA))
 
-        // Si ferma quando lasciamo la pagina di login (login completato o reindirizzato)
+        // IMPORTANTE: Echo confronta questa regex con TUTTE le richieste della WebView,
+        // anche CSS/JS/immagini. Combacia quindi SOLO con la destinazione post-login:
+        // css.php, js/... e la pagina di login non la attivano mai, altrimenti
+        // la WebView si chiuderebbe in pochi millisecondi prima di mostrare il modulo.
         override val stopUrlRegex =
-        Regex("""https://downloads\.khinsider\.com/(cp/favorites|forums)(/|(\?.*))?$""")
+            Regex("""https://downloads\.khinsider\.com/(cp/favorites|forums)(/|(\?.*))?$""")
 
         override suspend fun onStop(url: NetworkRequest, cookie: String): List<User> {
             val preview = cookie.take(120)
@@ -403,20 +408,28 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
                 )
             }
 
-            // Il sito principale potrebbe rilasciare un cookie di sessione proprio:
-            // visitiamo la home una volta per raccoglierlo prima della verifica.
+            // Visita la home per eventuali cookie di sessione del sito principale.
             val session = warmUpSession(cookie)
-            if (!verifySession(session)) {
+
+            // Verifica: /cp/favorites risponde 200 con i contenuti solo se loggati.
+            val (loggedIn, mainHtml) = checkMainSession(session)
+            if (!loggedIn) {
                 val hint = if (!cookie.contains("xf_user"))
-                    " Suggerimento: nella pagina di login spunta \"Stay logged in\" (Resta connesso): " +
-                    "senza il cookie xf_user il sito potrebbe non riconoscere la sessione."
+                    " Suggerimento: nella pagina di login spunta \"Stay logged in\" (Resta connesso)."
                 else ""
                 throw Exception("Login non riuscito: impossibile verificare la sessione. Cookie ricevuti: $preview.$hint")
             }
+
+            // Nome utente reale (es. "Zippatias") invece del nome fisso "Khinsider".
+            val accountHtml = runCatching {
+                getPageWithCookie("https://downloads.khinsider.com/forums/index.php?account/", session)
+            }.getOrDefault("")
+            val name = parseUsername(mainHtml, accountHtml) ?: "Khinsider"
+
             return listOf(
                 User(
                     id = "khinsider",
-                    name = "Khinsider",
+                    name = name,
                     subtitle = "Account khinsider",
                     extras = mapOf("cookie" to session),
                 )
@@ -431,55 +444,88 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
 
     override suspend fun getCurrentUser(): User? = user
 
-/** /cp/favorites: 200 con i contenuti = loggato; 200 con "you need to be registered and logged in" = ospite. */
-private suspend fun verifySession(cookie: String): Boolean = runCatching {
-    if (!cookie.contains("xf_session")) return@runCatching false
-    val request = Request.Builder()
-        .url("https://downloads.khinsider.com/cp/favorites")
-        .header("User-Agent", UA)
-        .header("Cookie", cookie)
-        .build()
-    val response = noRedirectClient.newCall(request).await()
-    val code = response.code
-    val body = response.body?.string() ?: ""
-    response.close()
-    val loggedOut = body.contains("need to be registered and logged in") ||
-        body.contains("/forums/login") || body.contains(">Log In")
-    code == 200 && !loggedOut
-}.getOrDefault(false)
-
-/** Visita la home del sito con i cookie del forum e restituisce i cookie aggiornati
- *  (alcuni siti rilasciano un cookie di sessione proprio sulla prima pagina del sito principale). */
-private suspend fun warmUpSession(cookie: String): String = runCatching {
-    var current = cookie
-    var url = "https://downloads.khinsider.com/"
-    repeat(5) {
-        val request = Request.Builder().url(url)
+    /** GET con cookie, senza seguire i redirect. Restituisce (loggato?, HTML della pagina). */
+    private suspend fun checkMainSession(cookie: String): Pair<Boolean, String> = runCatching {
+        if (!cookie.contains("xf_session")) return@runCatching false to ""
+        val request = Request.Builder()
+            .url("https://downloads.khinsider.com/cp/favorites")
             .header("User-Agent", UA)
-            .header("Cookie", current)
+            .header("Cookie", cookie)
             .build()
         val response = noRedirectClient.newCall(request).await()
-        val setCookies = response.headers("Set-Cookie").map { it.substringBefore(";") }
-        if (setCookies.isNotEmpty()) current = mergeCookies(current, setCookies)
-        val location = response.header("Location")
         val code = response.code
+        val body = response.body?.string() ?: ""
         response.close()
-        if (code !in 300..399 || location == null) return@runCatching current
-        url = if (location.startsWith("http")) location else "https://downloads.khinsider.com$location"
-    }
-    current
-}.getOrDefault(cookie)
+        val loggedOut = body.contains("need to be registered and logged in") ||
+            body.contains("/forums/login") || body.contains(">Log In")
+        (code == 200 && !loggedOut) to body
+    }.getOrDefault(false to "")
 
-private fun mergeCookies(base: String, additional: List<String>): String {
-    val map = LinkedHashMap<String, String>()
-    (listOf(base) + additional).forEach { part ->
-        part.split(";").forEach { kv ->
-            val i = kv.indexOf('=')
-            if (i > 0) map[kv.substring(0, i).trim()] = kv.substring(i + 1).trim()
-        }
+    /** GET con cookie, seguendo i redirect (per la pagina account del forum). */
+    private suspend fun getPageWithCookie(url: String, cookie: String): String {
+        val request = Request.Builder().url(url)
+            .header("User-Agent", UA)
+            .header("Cookie", cookie)
+            .build()
+        val response = client.newCall(request).await()
+        val body = response.body?.string() ?: ""
+        response.close()
+        return body
     }
-    return map.entries.joinToString("; ") { "${it.key}=${it.value}" }
-}
+
+    /** Cerca il nome utente vero nell'HTML della pagina account XenForo o del sito principale. */
+    private fun parseUsername(mainHtml: String, accountHtml: String): String? {
+        Regex("""class="username">([^<]+)</span>""").find(accountHtml)?.let {
+            val n = it.groupValues[1].trim()
+            if (n.isNotBlank()) return n
+        }
+        Regex("""class="menu-header-main">([^<]+)</span>""").find(accountHtml)?.let {
+            val n = it.groupValues[1].trim()
+            if (n.isNotBlank()) return n
+        }
+        Regex("""href="[^"]*/user(?:s)?/([^"/?]+)""", RegexOption.IGNORE_CASE).find(mainHtml)?.let {
+            val n = it.groupValues[1].trim()
+            if (n.isNotBlank()) return n
+        }
+        Regex("""Welcome(?:\s+back)?,\s*([^<!"']+)""", RegexOption.IGNORE_CASE).find(mainHtml)?.let {
+            val n = it.groupValues[1].trim()
+            if (n.isNotBlank()) return n
+        }
+        return null
+    }
+
+    /** Visita la home del sito con i cookie del forum e restituisce i cookie aggiornati
+     *  (alcuni siti rilasciano un cookie di sessione proprio sulla prima pagina del sito principale). */
+    private suspend fun warmUpSession(cookie: String): String = runCatching {
+        var current = cookie
+        var url = "https://downloads.khinsider.com/"
+        repeat(5) {
+            val request = Request.Builder().url(url)
+                .header("User-Agent", UA)
+                .header("Cookie", current)
+                .build()
+            val response = noRedirectClient.newCall(request).await()
+            val setCookies = response.headers("Set-Cookie").map { it.substringBefore(";") }
+            if (setCookies.isNotEmpty()) current = mergeCookies(current, setCookies)
+            val location = response.header("Location")
+            val code = response.code
+            response.close()
+            if (code !in 300..399 || location == null) return@runCatching current
+            url = if (location.startsWith("http")) location else "https://downloads.khinsider.com$location"
+        }
+        current
+    }.getOrDefault(cookie)
+
+    private fun mergeCookies(base: String, additional: List<String>): String {
+        val map = LinkedHashMap<String, String>()
+        (listOf(base) + additional).forEach { part ->
+            part.split(";").forEach { kv ->
+                val i = kv.indexOf('=')
+                if (i > 0) map[kv.substring(0, i).trim()] = kv.substring(i + 1).trim()
+            }
+        }
+        return map.entries.joinToString("; ") { "${it.key}=${it.value}" }
+    }
 
     // ---------- LIBRERIA ----------
 
@@ -507,17 +553,25 @@ private fun mergeCookies(base: String, additional: List<String>): String {
         else listOf(Shelf.Lists.Items(id = "latest", title = "Ultimi arrivi", list = albums))
     }
 
-    override suspend fun loadSearchFeed(query: String): Feed<Shelf> {
+    override suspend fun loadSearchFeed(query: String): Feed<Shelf> = withContext(Dispatchers.Default) {
         if (query.isBlank()) {
-            return Feed(listOf()) { latestShelves().toFeedData() }
+            return@withContext Feed(listOf()) { latestShelves().toFeedData() }
         }
-        val json = getJson(apiUrl("/api/search", mapOf("q" to query))).jsonObject
+        // 1) ricerca normale sul mirror
         val albums = runCatching {
-            json["items"]?.jsonArray?.mapNotNull { it.jsonObject.toAlbumItem() }
+            getJson(apiUrl("/api/search", mapOf("q" to query))).jsonObject
+                .get("items")?.jsonArray?.mapNotNull { it.jsonObject.toAlbumItem() }
         }.getOrNull().orEmpty()
-        val shelves = if (albums.isEmpty()) emptyList()
-        else listOf(Shelf.Lists.Items(id = "albums", title = "Album", list = albums))
-        return shelves.toFeed()
+
+        // 2) impariamo i titoli visti (per le prossime ricerche fuzzy)
+        albums.forEach { item -> FuzzyIndex.add(item.id, item.title) }
+
+        // 3) se l'API non trova nulla, fallback fuzzy sul catalogo locale
+        val results = if (albums.isNotEmpty()) albums else FuzzyIndex.search(query)
+
+        val shelves = if (results.isEmpty()) emptyList()
+        else listOf(Shelf.Lists.Items(id = "albums", title = "Album", list = results))
+        shelves.toFeed()
     }
 
     // ---------- Album ----------
@@ -565,4 +619,77 @@ private fun mergeCookies(base: String, additional: List<String>): String {
     }
 
     override suspend fun loadFeed(track: Track): Feed<Shelf> = emptyList<Shelf>().toFeed()
+}
+
+/** Indice fuzzy in memoria dei titoli degli album. Thread-safe. */
+object FuzzyIndex {
+    private class Entry(val id: String, val title: String, val norm: String)
+    private val entries = mutableListOf<Entry>()
+
+    fun add(id: String, title: String) {
+        synchronized(this) {
+            if (entries.none { it.id == id }) entries += Entry(id, title, normalize(title))
+        }
+    }
+
+    fun search(query: String, limit: Int = 20): List<Album> {
+        val q = normalize(query)
+        if (q.length < 3) return emptyList()
+        val qBigrams = q.windowed(2).toSet()
+        val scored = mutableListOf<Pair<Double, Entry>>()
+        synchronized(this) {
+            for (e in entries) {
+                if (qBigrams.none { e.norm.contains(it) }) continue // prefilter veloce
+                val sim = similarity(q, e.norm)
+                if (sim >= 0.55) scored += sim to e
+            }
+        }
+        return scored.sortedByDescending { it.first }
+            .take(limit)
+            .map { (_, e) -> Album(e.id, e.title) }
+    }
+
+    private fun normalize(s: String): String {
+        val sb = StringBuilder()
+        for (c in s.lowercase()) {
+            val d = when (c) {
+                'à', 'á', 'â', 'ä', 'ã', 'å' -> 'a'
+                'è', 'é', 'ê', 'ë' -> 'e'
+                'ì', 'í', 'î', 'ï' -> 'i'
+                'ò', 'ó', 'ô', 'ö', 'õ' -> 'o'
+                'ù', 'ú', 'û', 'ü' -> 'u'
+                'ç' -> 'c'
+                'ñ' -> 'n'
+                else -> c
+            }
+            if (d in 'a'..'z' || d in '0'..'9' || d == ' ') sb.append(d)
+        }
+        return sb.toString().replace(Regex("\\s+"), " ").trim()
+    }
+
+    private fun similarity(a: String, b: String): Double {
+        val dist = damerauLevenshtein(a, b)
+        return 1.0 - dist.toDouble() / maxOf(a.length, b.length, 1)
+    }
+
+    /** Damerau-Levenshtein, variante Optimal String Alignment. */
+    private fun damerauLevenshtein(a: String, b: String): Int {
+        val m = a.length
+        val n = b.length
+        if (m == 0) return n
+        if (n == 0) return m
+        val d = Array(m + 1) { IntArray(n + 1) }
+        for (i in 0..m) d[i][0] = i
+        for (j in 0..n) d[0][j] = j
+        for (i in 1..m) {
+            for (j in 1..n) {
+                val cost = if (a[i - 1] == b[j - 1]) 0 else 1
+                d[i][j] = minOf(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + cost)
+                if (i > 1 && j > 1 && a[i - 1] == b[j - 2] && a[i - 2] == b[j - 1]) {
+                    d[i][j] = minOf(d[i][j], d[i - 2][j - 2] + 1)
+                }
+            }
+        }
+        return d[m][n]
+    }
 }
