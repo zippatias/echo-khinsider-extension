@@ -7,6 +7,7 @@ colonne sonore di videogiochi dal sito khinsider (mirror khinsider.squid.wtf).
 - **Home**: ultimi arrivi da khinsider
 - **Ricerca**: cerca album per titolo
 - **Album**: apri un album e riproduci le tracce MP3
+- **Libreria**: attraverso la funzionalità di login, visiona gli ultimi album ascoltati dal sito di khinsider.com e gli album preferiti (funzionalità ancora limitate) 
 
 ## Installazione
 1. Apri la pagina [Releases](https://github.com/zippatias/echo-khinsider-extension/releases)
