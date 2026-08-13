@@ -30,6 +30,7 @@ import dev.brahmkshatriya.echo.common.models.Track
 import dev.brahmkshatriya.echo.common.models.User
 import dev.brahmkshatriya.echo.common.settings.Setting
 import dev.brahmkshatriya.echo.common.settings.Settings
+import dev.brahmkshatriya.echo.common.settings.SettingSwitch
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -52,13 +53,23 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
 
     private val client = OkHttpClient()
     private val noRedirectClient = OkHttpClient.Builder().followRedirects(false).build()
-    private lateinit var setting: Settings
+    private var setting: Settings? = null
     private val audioCache = mutableMapOf<String, String>()
     private val coverCache = mutableMapOf<String, String>()          // albumId -> URL copertina media
     private val coverEnrichLimit = 30                                 // max copertine dal mirror per scaffale
     private val UA = "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/120.0 Mobile Safari/537.36"
 
-    override suspend fun getSettingItems(): List<Setting> = emptyList()
+    override suspend fun getSettingItems(): List<Setting> = listOf(
+        SettingSwitch(
+            "Copertine ad alta risoluzione",
+            "high_res_covers",
+            "Usa le immagini originali (grandi) per la pagina album e per i brani. Disattiva per immagini medie, più leggere e veloci da caricare.",
+            highResCovers,
+        )
+    )
+
+    /** True = copertine originali per album e brani; False = medie (/thumbs/). */
+    private val highResCovers get() = setting?.getBoolean("high_res_covers") ?: true
 
     override fun setSettings(settings: Settings) {
         setting = settings
@@ -90,7 +101,7 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
         return response.body?.string() ?: throw Exception("Risposta vuota")
     }
 
-    /** Converte qualsiasi URL di immagine nella variante MEDIA (/thumbs/), passando dal proxy del mirror. */
+    /** Copertina MEDIA (/thumbs/) via proxy: usata per liste, scaffali e ricerca. */
     private fun imageUrl(raw: String?): String? {
         if (raw.isNullOrBlank()) return null
         val target = when {
@@ -101,6 +112,16 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
         }
         return apiUrl("/api/image", mapOf("url" to target))
     }
+
+    /** Copertina ORIGINALE (alta risoluzione) via proxy: per la pagina album e i brani. */
+    private fun imageUrlFull(raw: String?): String? {
+        if (raw.isNullOrBlank()) return null
+        return apiUrl("/api/image", mapOf("url" to raw))
+    }
+
+    /** Sceglie alta o media in base all'impostazione utente. */
+    private fun albumImageUrl(raw: String?): String? =
+        if (highResCovers) imageUrlFull(raw) else imageUrl(raw)
 
     private fun downloadUrl(target: String): String =
         apiUrl("/api/download", mapOf("url" to target))
@@ -162,7 +183,7 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
     private fun JsonObject.toAlbumDetails(album: Album): Album {
         val title = str("name") ?: album.title
         val year = str("year")
-        val cover = imageUrl(str("coverUrl"))?.toImageHolder() ?: album.cover
+        val cover = albumImageUrl(str("coverUrl"))?.toImageHolder() ?: album.cover
         val artistName = str("albumArtist")
         val artists = artistName?.takeIf { it.isNotBlank() }?.let {
             listOf(Artist(id = it, name = it))
@@ -182,7 +203,7 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
 
     private fun JsonObject.toTracks(album: Album): List<Track> {
         val albumTitle = str("name") ?: album.title
-        val cover = imageUrl(str("coverUrl"))?.toImageHolder() ?: album.cover
+        val cover = albumImageUrl(str("coverUrl"))?.toImageHolder() ?: album.cover
         val artistName = str("albumArtist")
         val artists = artistName?.takeIf { it.isNotBlank() }?.let {
             listOf(Artist(id = it, name = it))
