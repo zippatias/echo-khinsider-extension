@@ -400,6 +400,13 @@ override val webViewRequest = object : WebViewRequest.Cookie<List<User>> {
                     "Assicurati di aver completato il login nella pagina web."
             )
         }
+        override fun setLoginUser(user: User?) {
+        this.user = user
+        this.cookie = user?.extras?.get("cookie")
+    }
+
+    override suspend fun getCurrentUser(): User? = user
+
         // Il sito principale potrebbe rilasciare un cookie di sessione proprio:
         // visitiamo la home una volta per raccoglierlo prima della verifica.
         val session = warmUpSession(cookie)
