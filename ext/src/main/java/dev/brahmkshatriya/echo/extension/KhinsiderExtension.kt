@@ -373,60 +373,61 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
         }
     }
 
-        // ---------- LOGIN ----------
+    // ---------- LOGIN ----------
 
-private var user: User? = null
-private var cookie: String? = null
+    private var user: User? = null
+    private var cookie: String? = null
 
-override val webViewRequest = object : WebViewRequest.Cookie<List<User>> {
-    override val dontCache = true
+    override val webViewRequest = object : WebViewRequest.Cookie<List<User>> {
+        override val dontCache = true
 
-    // Apriamo la pagina di login con ?redirect=/cp/favorites:
-    // XenForo precompila il campo nascosto "redirect" della form con questo valore,
-    // così dopo un login riuscito il WebView finisce su una pagina che esiste solo
-    // da autenticati e il flusso si ferma SOLO a login davvero completato.
-    override val initialUrl =
-        "https://downloads.khinsider.com/forums/login?redirect=%2Fcp%2Ffavorites".toGetRequest()
+        // Apriamo la pagina di login con ?redirect=/cp/favorites:
+        // XenForo precompila il campo nascosto "redirect" della form con questo valore,
+        // così dopo un login riuscito il WebView finisce su una pagina che esiste solo
+        // da autenticati e il flusso si ferma SOLO a login davvero completato.
+        override val initialUrl =
+            "https://downloads.khinsider.com/forums/login?redirect=%2Fcp%2Ffavorites".toGetRequest()
 
-    // Si ferma quando lasciamo la pagina di login (login completato o reindirizzato)
-    override val stopUrlRegex = Regex("""https://downloads\.khinsider\.com/(?!.*login).*""")
+        // Si ferma quando lasciamo la pagina di login (login completato o reindirizzato)
+        override val stopUrlRegex = Regex("""https://downloads\.khinsider\.com/(?!.*login).*""")
 
-    override suspend fun onStop(url: NetworkRequest, cookie: String): List<User> {
-        val preview = cookie.take(120)
-        if (!cookie.contains("xf_session")) {
-            throw Exception(
-                "Login non riuscito: nessuna sessione XenForo ricevuta. " +
-                    "Cookie ricevuti: $preview. " +
-                    "Assicurati di aver completato il login nella pagina web."
+        override suspend fun onStop(url: NetworkRequest, cookie: String): List<User> {
+            val preview = cookie.take(120)
+            if (!cookie.contains("xf_session")) {
+                throw Exception(
+                    "Login non riuscito: nessuna sessione XenForo ricevuta. " +
+                        "Cookie ricevuti: $preview. " +
+                        "Assicurati di aver completato il login nella pagina web."
+                )
+            }
+
+            // Il sito principale potrebbe rilasciare un cookie di sessione proprio:
+            // visitiamo la home una volta per raccoglierlo prima della verifica.
+            val session = warmUpSession(cookie)
+            if (!verifySession(session)) {
+                val hint = if (!cookie.contains("xf_user"))
+                    " Suggerimento: nella pagina di login spunta \"Stay logged in\" (Resta connesso): " +
+                    "senza il cookie xf_user il sito potrebbe non riconoscere la sessione."
+                else ""
+                throw Exception("Login non riuscito: impossibile verificare la sessione. Cookie ricevuti: $preview.$hint")
+            }
+            return listOf(
+                User(
+                    id = "khinsider",
+                    name = "Khinsider",
+                    subtitle = "Account khinsider",
+                    extras = mapOf("cookie" to session),
+                )
             )
         }
-        override fun setLoginUser(user: User?) {
+    }
+
+    override fun setLoginUser(user: User?) {
         this.user = user
         this.cookie = user?.extras?.get("cookie")
     }
 
     override suspend fun getCurrentUser(): User? = user
-
-        // Il sito principale potrebbe rilasciare un cookie di sessione proprio:
-        // visitiamo la home una volta per raccoglierlo prima della verifica.
-        val session = warmUpSession(cookie)
-        if (!verifySession(session)) {
-            val hint = if (!cookie.contains("xf_user"))
-                " Suggerimento: nella pagina di login spunta \"Stay logged in\" (Resta connesso): " +
-                "senza il cookie xf_user il sito potrebbe non riconoscere la sessione."
-            else ""
-            throw Exception("Login non riuscito: impossibile verificare la sessione. Cookie ricevuti: $preview.$hint")
-        }
-        return listOf(
-            User(
-                id = "khinsider",
-                name = "Khinsider",
-                subtitle = "Account khinsider",
-                extras = mapOf("cookie" to session),
-            )
-        )
-    }
-}
 
 /** /cp/favorites: 200 con i contenuti = loggato; 200 con "you need to be registered and logged in" = ospite. */
 private suspend fun verifySession(cookie: String): Boolean = runCatching {
