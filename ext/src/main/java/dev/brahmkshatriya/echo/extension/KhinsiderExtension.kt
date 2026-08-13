@@ -21,6 +21,7 @@ import dev.brahmkshatriya.echo.common.models.Track
 import dev.brahmkshatriya.echo.common.settings.Setting
 import dev.brahmkshatriya.echo.common.settings.Settings
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonArray
@@ -53,12 +54,12 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
         return "$baseUrl$path${if (params.isEmpty()) "" else "?$params"}"
     }
 
-    private suspend fun getJson(url: String): JsonObject {
+    private suspend fun getJson(url: String): JsonElement {
         val request = Request.Builder().url(url).build()
         val response = client.newCall(request).await()
         if (!response.isSuccessful) throw Exception("HTTP ${response.code}")
         val body = response.body?.string() ?: throw Exception("Risposta vuota")
-        return Json.parseToJsonElement(body).jsonObject
+        return Json.parseToJsonElement(body)
     }
 
     private fun imageUrl(raw: String?): String? {
@@ -105,7 +106,7 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
     private fun JsonObject.toAlbumItem(): Album? {
         val title = str("title")?.takeIf { it.isNotBlank() } ?: return null
         val id = albumPathOf(str("albumId") ?: str("id") ?: str("url")) ?: return null
-        val cover = imageUrl(str("icon") ?: str("image"))
+        val cover = imageUrl(str("icon") ?: str("image"))?.toImageHolder()
         val subtitle = listOfNotNull(str("albumType"), str("year")).joinToString(" • ").ifBlank { null }
         return Album(id = id, title = title, cover = cover, subtitle = subtitle)
     }
@@ -113,7 +114,7 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
     private fun JsonObject.toAlbumDetails(album: Album): Album {
         val title = str("name") ?: album.title
         val year = str("year")
-        val cover = imageUrl(str("coverUrl")) ?: album.cover
+        val cover = imageUrl(str("coverUrl"))?.toImageHolder() ?: album.cover
         val artistName = str("albumArtist")
         val artists = artistName?.takeIf { it.isNotBlank() }?.let {
             listOf(Artist(id = it, name = it))
@@ -133,7 +134,7 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
 
     private fun JsonObject.toTracks(album: Album): List<Track> {
         val albumTitle = str("name") ?: album.title
-        val cover = imageUrl(str("coverUrl")) ?: album.cover
+        val cover = imageUrl(str("coverUrl"))?.toImageHolder() ?: album.cover
         val artistName = str("albumArtist")
         val artists = artistName?.takeIf { it.isNotBlank() }?.let {
             listOf(Artist(id = it, name = it))
@@ -179,7 +180,7 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
         if (query.isBlank()) {
             return Feed(listOf()) { latestShelves().toFeedData() }
         }
-        val json = getJson(apiUrl("/api/search", mapOf("q" to query)))
+        val json = getJson(apiUrl("/api/search", mapOf("q" to query))).jsonObject
         val albums = runCatching {
             json["items"]?.jsonArray?.mapNotNull { it.jsonObject.toAlbumItem() }
         }.getOrNull().orEmpty()
@@ -196,7 +197,7 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
     private suspend fun albumMeta(id: String): JsonObject {
         if (cacheAlbumId == id && cacheAlbumJson != null) return cacheAlbumJson!!
         val json = runCatching {
-            getJson(apiUrl("/api/album", mapOf("url" to id)))
+            getJson(apiUrl("/api/album", mapOf("url" to id))).jsonObject
         }.getOrElse {
             buildJsonObject { put("name", "") }
         }
