@@ -46,6 +46,7 @@ import java.net.URLEncoder
 class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, AlbumClient, TrackClient, LibraryFeedClient, LoginClient.WebView {
 
     private val client = OkHttpClient()
+    private val noRedirectClient = OkHttpClient.Builder().followRedirects(false).build()
     private lateinit var setting: Settings
     private val audioCache = mutableMapOf<String, String>()
 
@@ -401,14 +402,13 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
     }
 
     /** Verifica reale: /cp/favorites risponde 200 solo se loggati (302 = reindirizzato al login) */
-    private suspend fun verifySession(cookie: String): Boolean = runCatching {
+        private suspend fun verifySession(cookie: String): Boolean = runCatching {
         val request = Request.Builder()
             .url("https://downloads.khinsider.com/cp/favorites")
             .header("User-Agent", "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/120.0 Mobile Safari/537.36")
             .header("Cookie", cookie)
-            .followRedirects(false)
             .build()
-        val response = client.newCall(request).await()
+        val response = noRedirectClient.newCall(request).await()
         val code = response.code
         response.close()
         code == 200
