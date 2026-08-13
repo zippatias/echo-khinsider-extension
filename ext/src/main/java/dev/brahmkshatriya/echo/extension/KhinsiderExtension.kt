@@ -4,20 +4,29 @@ import dev.brahmkshatriya.echo.common.clients.AlbumClient
 import dev.brahmkshatriya.echo.common.clients.ExtensionClient
 import dev.brahmkshatriya.echo.common.clients.HomeFeedClient
 import dev.brahmkshatriya.echo.common.clients.LibraryFeedClient
+import dev.brahmkshatriya.echo.common.clients.LoginClient
 import dev.brahmkshatriya.echo.common.clients.SearchFeedClient
 import dev.brahmkshatriya.echo.common.clients.TrackClient
+import dev.brahmkshatriya.echo.common.helpers.ClientException
 import dev.brahmkshatriya.echo.common.helpers.ContinuationCallback.Companion.await
+import dev.brahmkshatriya.echo.common.helpers.PagedData
+import dev.brahmkshatriya.echo.common.helpers.WebViewRequest
 import dev.brahmkshatriya.echo.common.models.Album
 import dev.brahmkshatriya.echo.common.models.Artist
 import dev.brahmkshatriya.echo.common.models.Date as EchoDate
+import dev.brahmkshatriya.echo.common.models.EchoMediaItem
 import dev.brahmkshatriya.echo.common.models.Feed
 import dev.brahmkshatriya.echo.common.models.Feed.Companion.toFeed
 import dev.brahmkshatriya.echo.common.models.Feed.Companion.toFeedData
 import dev.brahmkshatriya.echo.common.models.ImageHolder.Companion.toImageHolder
+import dev.brahmkshatriya.echo.common.models.NetworkRequest
+import dev.brahmkshatriya.echo.common.models.NetworkRequest.Companion.toGetRequest
 import dev.brahmkshatriya.echo.common.models.Shelf
 import dev.brahmkshatriya.echo.common.models.Streamable
 import dev.brahmkshatriya.echo.common.models.Streamable.Media.Companion.toServerMedia
+import dev.brahmkshatriya.echo.common.models.Tab
 import dev.brahmkshatriya.echo.common.models.Track
+import dev.brahmkshatriya.echo.common.models.User
 import dev.brahmkshatriya.echo.common.settings.Setting
 import dev.brahmkshatriya.echo.common.settings.Settings
 import kotlinx.serialization.json.Json
@@ -33,7 +42,7 @@ import okhttp3.Request
 import java.net.URLDecoder
 import java.net.URLEncoder
 
-class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, AlbumClient, TrackClient, LibraryFeedClient {
+class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, AlbumClient, TrackClient, LibraryFeedClient, LoginClient.WebView {
 
     private val client = OkHttpClient()
     private lateinit var setting: Settings
@@ -45,7 +54,7 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
         setting = settings
     }
 
-    // ---------- API ----------
+    // ---------- API (mirror) ----------
 
     private val baseUrl = "https://khinsider.squid.wtf"
 
@@ -71,7 +80,7 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
         return response.body?.string() ?: throw Exception("Risposta vuota")
     }
 
-        private fun imageUrl(raw: String?): String? {
+    private fun imageUrl(raw: String?): String? {
         if (raw.isNullOrBlank()) return null
         val target = raw.replace("/thumbs_small/", "/thumbs/")
         return apiUrl("/api/image", mapOf("url" to target))
@@ -165,7 +174,7 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
             listOf(Artist(id = it, name = it))
         } ?: emptyList()
         val albumModel = Album(id = album.id, title = albumTitle, cover = cover)
-                val hasFlac = runCatching {
+        val hasFlac = runCatching {
             this["availableFormats"]?.jsonArray?.any {
                 it.jsonPrimitive.content.equals("flac", true)
             } ?: false
@@ -194,7 +203,202 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
         }
     }
 
-    // ---------- Home ----------
+    // ---------- LE SEZIONI DEL SITO (nuovo) ----------
+
+    private const val KHI = "https://downloads.khinsider.com"
+
+    private val platforms = listOf(
+        "NES" to "/game-soundtracks/nintendo-nes",
+        "SNES" to "/game-soundtracks/nintendo-snes",
+        "N64" to "/game-soundtracks/nintendo-64",
+        "GC" to "/game-soundtracks/nintendo-gamecube",
+        "Wii" to "/game-soundtracks/nintendo-wii",
+        "Wii U" to "/game-soundtracks/nintendo-wii-u",
+        "Switch" to "/game-soundtracks/nintendo-switch",
+        "Switch 2" to "/game-soundtracks/switch-2",
+        "GB" to "/game-soundtracks/gameboy",
+        "GBA" to "/game-soundtracks/gameboy-advance",
+        "DS" to "/game-soundtracks/nintendo-ds",
+        "3DS" to "/game-soundtracks/nintendo-3ds",
+        "PS1" to "/game-soundtracks/playstation",
+        "PS2" to "/game-soundtracks/playstation-2",
+        "PS3" to "/game-soundtracks/playstation-3",
+        "PS4" to "/game-soundtracks/playstation-4",
+        "PS5" to "/game-soundtracks/playstation-5",
+        "PSP" to "/game-soundtracks/playstation-portable-psp",
+        "PS Vita" to "/game-soundtracks/playstation-vita",
+        "Steam" to "/game-soundtracks/steam",
+        "Windows" to "/game-soundtracks/windows",
+        "Xbox" to "/game-soundtracks/xbox",
+        "Xbox 360" to "/game-soundtracks/xbox-360",
+        "Xbox One" to "/game-soundtracks/xbox-one",
+    )
+
+    private val types = listOf(
+        "Gamerips" to "/game-soundtracks/gamerips",
+        "Soundtracks" to "/game-soundtracks/ost",
+        "Singles" to "/game-soundtracks/singles",
+        "Arrangements" to "/game-soundtracks/arrangements",
+        "Remixes" to "/game-soundtracks/remixes",
+        "Compilations" to "/game-soundtracks/compilations",
+        "Inspired By" to "/game-soundtracks/inspired-by",
+    )
+
+    // ---------- Helper scraping ----------
+
+    private val albumLinkRegex =
+        Regex("""<a href="/game-soundtracks/album/([^"/]+)/?"[^>]*>(.*?)</a>""", RegexOption.DOT_MATCHES_ALL)
+
+    private suspend fun khinsiderGet(url: String, cookie: String? = null): String {
+        val builder = Request.Builder().url(url)
+            .header("User-Agent", "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/120.0 Mobile Safari/537.36")
+        if (cookie != null) builder.header("Cookie", cookie)
+        val response = client.newCall(builder.build()).await()
+        if (!response.isSuccessful) throw ClientException("HTTP ${response.code}")
+        return response.body?.string() ?: ""
+    }
+
+    private suspend fun scrapeAlbumList(url: String, limit: Int = 30, cookie: String? = null): List<Album> {
+        val html = runCatching { khinsiderGet(url, cookie) }.getOrDefault("")
+        val albums = LinkedHashMap<String, Album>()   // niente duplicati
+        for (match in albumLinkRegex.findAll(html)) {
+            val slug = match.groupValues[1].trim()
+            if (slug.isBlank()) continue
+            val inner = match.groupValues[2]
+            val title = Regex("""<[^>]+>""").replace(inner, " ")
+                .replace(Regex("""\s+"""), " ").trim()
+                .replace("&amp;", "&").replace("&quot;", "\"")
+                .replace("&#39;", "'").replace("&lt;", "<").replace("&gt;", ">")
+            val cover = Regex("""<img[^>]+src="([^"]+)"[^>]*>""").find(inner)?.groupValues?.get(1)
+                ?.let { if (it.startsWith("http")) it else "$KHI$it" }
+            albums[slug] = Album(
+                id = slug,
+                title = title.ifBlank { slug.replace('-', ' ') },
+                cover = cover?.toImageHolder(),
+            )
+            if (albums.size >= limit) break
+        }
+        return albums.values.toList()
+    }
+
+    /** Scroll infinito: ogni chiamata carica la pagina successiva del sito */
+    private fun pagedAlbums(path: String, cookie: String? = null): PagedData<EchoMediaItem> =
+        PagedData.Suspend { key ->
+            val page = key?.toIntOrNull() ?: 1
+            val url = if (page == 1) "$KHI$path" else "$KHI$path?page=$page"
+            val items: List<EchoMediaItem> = scrapeAlbumList(url, 30, cookie)
+            items to if (items.size < 30) null else (page + 1).toString()
+        }
+
+    private suspend fun albumsShelf(
+        id: String, title: String, path: String,
+        preview: Int = 12, cookie: String? = null, paged: Boolean = false,
+    ): Shelf? {
+        val albums = runCatching { scrapeAlbumList("$KHI$path", preview, cookie) }.getOrDefault(emptyList())
+        if (albums.isEmpty()) return null   // sezione vuota o non raggiungibile → non mostrarla
+        return Shelf.Lists.Items(
+            id = id,
+            title = title,
+            list = albums,
+            more = if (paged) pagedAlbums(path, cookie) else null,
+        )
+    }
+
+    /** Le 24 console caricate a gruppi di 8 (scroll infinito tra le console) */
+    private fun pagedConsoleShelves(): PagedData<Shelf> = PagedData.Suspend { key ->
+        val start = (key?.toIntOrNull() ?: 0) * 8
+        val end = minOf(start + 8, platforms.size)
+        val shelves = platforms.subList(start, end).mapNotNull { (name, path) ->
+            runCatching { albumsShelf("console_${path.substringAfterLast('/')}", name, path, 12, paged = true) }
+                .getOrNull()
+        }
+        shelves to if (end < platforms.size) ((start / 8) + 1).toString() else null
+    }
+
+    // ---------- HOME ----------
+
+    override suspend fun loadHomeFeed(): Feed<Shelf> {
+        val tabs = listOf(
+            Tab("home", "Home"),
+            Tab("top", "Top"),
+            Tab("console", "Console"),
+            Tab("tipo", "Tipo"),
+        )
+        return Feed(tabs) { tab ->
+            when (tab?.id) {
+                "top" -> PagedData.Single {
+                    listOfNotNull(
+                        albumsShelf("top40", "Top 40", "/top40", 40),
+                        albumsShelf("top100", "Top 100 All Time", "/all-time-top-100", 100),
+                        albumsShelf("top6m", "Top 100 Ultimi 6 Mesi", "/last-6-months-top-100", 100),
+                        albumsShelf("topnew", "Top 100 Nuovi", "/top-100-newly-added", 100),
+                        albumsShelf("viewed", "Attualmente Visti", "/currently-viewed", 100),
+                        albumsShelf("favs", "Più Preferiti", "/most-favorites", 100),
+                    )
+                }.toFeedData()
+                "console" -> pagedConsoleShelves().toFeedData()
+                "tipo" -> PagedData.Single {
+                    types.mapNotNull { (name, path) ->
+                        albumsShelf("type_${path.substringAfterLast('/')}", name, path, 12, paged = true)
+                    }
+                }.toFeedData()
+                else -> PagedData.Single {
+                    listOfNotNull(
+                        albumsShelf("latest", "Ultimi Arrivi", "/", 20),
+                        albumsShelf("topnew", "Top 100 Nuovi", "/top-100-newly-added", 50),
+                        albumsShelf("viewed", "Attualmente Visti", "/currently-viewed", 50),
+                    )
+                }.toFeedData()
+            }
+        }
+    }
+
+    // ---------- LOGIN ----------
+
+    private var user: User? = null
+    private var cookie: String? = null
+
+    override val webViewRequest = object : WebViewRequest.Cookie<List<User>> {
+        override val dontCache = true
+        override val initialUrl = "https://downloads.khinsider.com/forums/login".toGetRequest()
+        // Si ferma quando il login è completato (non è più sulla pagina di login)
+        override val stopUrlRegex = Regex("""https://downloads\.khinsider\.com/(?!forums/login).*""")
+        override suspend fun onStop(url: NetworkRequest, cookie: String): List<User> {
+            if (!cookie.contains("member_id")) throw Exception("Login non riuscito")
+            return listOf(
+                User(
+                    id = "khinsider",
+                    title = "Khinsider",
+                    subtitle = "Account khinsider",
+                    extras = mapOf("cookie" to cookie),
+                )
+            )
+        }
+    }
+
+    override fun setLoginUser(user: User?) {
+        this.user = user
+        this.cookie = user?.extras?.get("cookie")
+    }
+
+    override suspend fun getCurrentUser(): User? = user
+
+    // ---------- LIBRERIA ----------
+
+    override suspend fun loadLibraryFeed(): Feed<Shelf> {
+        if (cookie == null) throw ClientException.LoginRequired()
+        return Feed(emptyList()) {
+            PagedData.Single {
+                listOfNotNull(
+                    albumsShelf("lib_favs", "I Miei Preferiti", "/cp/favorites", 30, cookie),
+                    albumsShelf("lib_history", "La Mia Cronologia", "/cp/history", 30, cookie),
+                    albumsShelf("lib_uploads", "I Miei Album", "/cp/uploads", 30, cookie),
+                )
+            }.toFeedData()
+        }
+    }
+
+    // ---------- Ricerca ----------
 
     private suspend fun latestShelves(): List<Shelf> {
         val json = getJson(apiUrl("/api/latest-home"))
@@ -204,12 +408,6 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
         return if (albums.isEmpty()) emptyList()
         else listOf(Shelf.Lists.Items(id = "latest", title = "Ultimi arrivi", list = albums))
     }
-
-    override suspend fun loadHomeFeed(): Feed<Shelf> = latestShelves().toFeed()
-
-    override suspend fun loadLibraryFeed(): Feed<Shelf> = emptyList<Shelf>().toFeed()
-
-    // ---------- Ricerca ----------
 
     override suspend fun loadSearchFeed(query: String): Feed<Shelf> {
         if (query.isBlank()) {
