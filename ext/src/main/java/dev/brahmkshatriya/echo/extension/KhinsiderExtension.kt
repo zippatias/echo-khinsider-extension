@@ -49,6 +49,7 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
     private val noRedirectClient = OkHttpClient.Builder().followRedirects(false).build()
     private lateinit var setting: Settings
     private val audioCache = mutableMapOf<String, String>()
+    private val UA = "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/120.0 Mobile Safari/537.36"
 
     override suspend fun getSettingItems(): List<Setting> = emptyList()
 
@@ -374,53 +375,101 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
 
         // ---------- LOGIN ----------
 
-       // ---------- LOGIN ----------
+private var user: User? = null
+private var cookie: String? = null
 
-    private var user: User? = null
-    private var cookie: String? = null
+override val webViewRequest = object : WebViewRequest.Cookie<List<User>> {
+    override val dontCache = true
 
-    override val webViewRequest = object : WebViewRequest.Cookie<List<User>> {
-        override val dontCache = true
-        override val initialUrl = "https://downloads.khinsider.com/forums/login".toGetRequest()
-        // Si ferma quando lasciamo la pagina di login (login completato o reindirizzato)
-        override val stopUrlRegex = Regex("""https://downloads\.khinsider\.com/(?!.*login).*""")
-        override suspend fun onStop(url: NetworkRequest, cookie: String): List<User> {
-            val loggedIn = verifySession(cookie)
-            if (!loggedIn) {
-                val preview = cookie.take(120)
-                throw Exception("Login non riuscito: impossibile verificare la sessione. Cookie ricevuti: $preview")
-            }
-            return listOf(
-                User(
-                    id = "khinsider",
-                    name = "Khinsider",
-                    subtitle = "Account khinsider",
-                    extras = mapOf("cookie" to cookie),
-                )
+    // Apriamo la pagina di login con ?redirect=/cp/favorites:
+    // XenForo precompila il campo nascosto "redirect" della form con questo valore,
+    // così dopo un login riuscito il WebView finisce su una pagina che esiste solo
+    // da autenticati e il flusso si ferma SOLO a login davvero completato.
+    override val initialUrl =
+        "https://downloads.khinsider.com/forums/login?redirect=%2Fcp%2Ffavorites".toGetRequest()
+
+    // Si ferma quando lasciamo la pagina di login (login completato o reindirizzato)
+    override val stopUrlRegex = Regex("""https://downloads\.khinsider\.com/(?!.*login).*""")
+
+    override suspend fun onStop(url: NetworkRequest, cookie: String): List<User> {
+        val preview = cookie.take(120)
+        if (!cookie.contains("xf_session")) {
+            throw Exception(
+                "Login non riuscito: nessuna sessione XenForo ricevuta. " +
+                    "Cookie ricevuti: $preview. " +
+                    "Assicurati di aver completato il login nella pagina web."
             )
         }
+        // Il sito principale potrebbe rilasciare un cookie di sessione proprio:
+        // visitiamo la home una volta per raccoglierlo prima della verifica.
+        val session = warmUpSession(cookie)
+        if (!verifySession(session)) {
+            val hint = if (!cookie.contains("xf_user"))
+                " Suggerimento: nella pagina di login spunta \"Stay logged in\" (Resta connesso): " +
+                "senza il cookie xf_user il sito potrebbe non riconoscere la sessione."
+            else ""
+            throw Exception("Login non riuscito: impossibile verificare la sessione. Cookie ricevuti: $preview.$hint")
+        }
+        return listOf(
+            User(
+                id = "khinsider",
+                name = "Khinsider",
+                subtitle = "Account khinsider",
+                extras = mapOf("cookie" to session),
+            )
+        )
     }
+}
 
-    /** Verifica reale: /cp/favorites risponde 200 solo se loggati (302 = reindirizzato al login) */
-    private suspend fun verifySession(cookie: String): Boolean = runCatching {
-        val request = Request.Builder()
-            .url("https://downloads.khinsider.com/cp/favorites")
-            .header("User-Agent", "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/120.0 Mobile Safari/537.36")
-            .header("Cookie", cookie)
+/** /cp/favorites: 200 con i contenuti = loggato; 200 con "you need to be registered and logged in" = ospite. */
+private suspend fun verifySession(cookie: String): Boolean = runCatching {
+    if (!cookie.contains("xf_session")) return@runCatching false
+    val request = Request.Builder()
+        .url("https://downloads.khinsider.com/cp/favorites")
+        .header("User-Agent", UA)
+        .header("Cookie", cookie)
+        .build()
+    val response = noRedirectClient.newCall(request).await()
+    val code = response.code
+    val body = response.body?.string() ?: ""
+    response.close()
+    val loggedOut = body.contains("need to be registered and logged in") ||
+        body.contains("/forums/login") || body.contains(">Log In")
+    code == 200 && !loggedOut
+}.getOrDefault(false)
+
+/** Visita la home del sito con i cookie del forum e restituisce i cookie aggiornati
+ *  (alcuni siti rilasciano un cookie di sessione proprio sulla prima pagina del sito principale). */
+private suspend fun warmUpSession(cookie: String): String = runCatching {
+    var current = cookie
+    var url = "https://downloads.khinsider.com/"
+    repeat(5) {
+        val request = Request.Builder().url(url)
+            .header("User-Agent", UA)
+            .header("Cookie", current)
             .build()
         val response = noRedirectClient.newCall(request).await()
+        val setCookies = response.headers("Set-Cookie").map { it.substringBefore(";") }
+        if (setCookies.isNotEmpty()) current = mergeCookies(current, setCookies)
+        val location = response.header("Location")
         val code = response.code
-        val body = response.body?.string() ?: ""
         response.close()
-        code == 200 && !body.contains("/forums/login") && !body.contains(">Log In")
-    }.getOrDefault(false)
-
-    override fun setLoginUser(user: User?) {
-        this.user = user
-        this.cookie = user?.extras?.get("cookie")
+        if (code !in 300..399 || location == null) return@runCatching current
+        url = if (location.startsWith("http")) location else "https://downloads.khinsider.com$location"
     }
+    current
+}.getOrDefault(cookie)
 
-    override suspend fun getCurrentUser(): User? = user
+private fun mergeCookies(base: String, additional: List<String>): String {
+    val map = LinkedHashMap<String, String>()
+    (listOf(base) + additional).forEach { part ->
+        part.split(";").forEach { kv ->
+            val i = kv.indexOf('=')
+            if (i > 0) map[kv.substring(0, i).trim()] = kv.substring(i + 1).trim()
+        }
+    }
+    return map.entries.joinToString("; ") { "${it.key}=${it.value}" }
+}
 
     // ---------- LIBRERIA ----------
 
