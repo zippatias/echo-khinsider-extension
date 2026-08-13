@@ -386,10 +386,12 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
         // così dopo un login riuscito il WebView finisce su una pagina che esiste solo
         // da autenticati e il flusso si ferma SOLO a login davvero completato.
         override val initialUrl =
-            "https://downloads.khinsider.com/forums/login?redirect=%2Fcp%2Ffavorites".toGetRequest()
+        "https://downloads.khinsider.com/forums/login?redirect=%2Fcp%2Ffavorites"
+            .toGetRequest(mapOf("User-Agent" to UA))
 
         // Si ferma quando lasciamo la pagina di login (login completato o reindirizzato)
-        override val stopUrlRegex = Regex("""https://downloads\.khinsider\.com/(?!.*login).*""")
+        override val stopUrlRegex =
+        Regex("""https://downloads\.khinsider\.com/(cp/favorites|forums)(/|(\?.*))?$""")
 
         override suspend fun onStop(url: NetworkRequest, cookie: String): List<User> {
             val preview = cookie.take(120)
