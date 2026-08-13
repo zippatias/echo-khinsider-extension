@@ -1,6 +1,6 @@
-# Khinsider Extension per Echo
+# Khinsider Extension per Echo/Echo Nightly
 
-Estensione per [Echo](https://github.com/brahmkshatriya/echo) che permette di cercare e ascoltare
+Estensione per [Echo](https://github.com/brahmkshatriya/echo)/[Nightly](https://github.com/itsmechinmoy/echo-nightly) che permette di cercare e ascoltare
 colonne sonore di videogiochi dal sito khinsider (mirror khinsider.squid.wtf).
 
 ## Funzionalità
