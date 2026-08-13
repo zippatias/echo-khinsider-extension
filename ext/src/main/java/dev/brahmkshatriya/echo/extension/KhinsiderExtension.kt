@@ -121,8 +121,6 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
     }
 
     // ---------- Risoluzione audio ----------
-    // L'URL della traccia è una pagina khinsider: bisogna scaricarla
-    // e cercare dentro il link vero (MP3 o FLAC) su vgmtreasurechest.com.
 
     private suspend fun resolveAudio(pageUrl: String, format: String = "mp3"): String {
         val html = getText(downloadUrl(pageUrl))
@@ -205,7 +203,7 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
 
     // ---------- LE SEZIONI DEL SITO (nuovo) ----------
 
-    private const val KHI = "https://downloads.khinsider.com"
+    private val KHI = "https://downloads.khinsider.com"
 
     private val platforms = listOf(
         "NES" to "/game-soundtracks/nintendo-nes",
@@ -254,7 +252,7 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
             .header("User-Agent", "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/120.0 Mobile Safari/537.36")
         if (cookie != null) builder.header("Cookie", cookie)
         val response = client.newCall(builder.build()).await()
-        if (!response.isSuccessful) throw ClientException("HTTP ${response.code}")
+        if (!response.isSuccessful) throw Exception("HTTP ${response.code}")
         return response.body?.string() ?: ""
     }
 
@@ -281,13 +279,31 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
         return albums.values.toList()
     }
 
-    /** Scroll infinito: ogni chiamata carica la pagina successiva del sito */
-    private fun pagedAlbums(path: String, cookie: String? = null): PagedData<EchoMediaItem> =
-        PagedData.Suspend { key ->
-            val page = key?.toIntOrNull() ?: 1
-            val url = if (page == 1) "$KHI$path" else "$KHI$path?page=$page"
-            val items: List<EchoMediaItem> = scrapeAlbumList(url, 30, cookie)
-            items to if (items.size < 30) null else (page + 1).toString()
+    /** Paginazione di Echo 1.0: Continuous carica le pagine una dopo l'altra */
+    private fun <T> continuousPaged(
+        loader: suspend (page: Int) -> Pair<List<T>, Boolean>,
+    ): PagedData<T> = PagedData.Continuous { key ->
+        val page = key?.toIntOrNull() ?: 1
+        val (items, hasMore) = loader(page)
+        items to if (hasMore) (page + 1).toString() else null
+    }
+
+    /** Pagina "More" di una console/tipo: una sezione per ogni pagina del sito */
+    private fun albumsMoreFeed(path: String, cookie: String? = null): Feed<Shelf> =
+        Feed(emptyList()) {
+            continuousPaged<Shelf> { page ->
+                val url = if (page == 1) "$KHI$path" else "$KHI$path?page=$page"
+                val items = scrapeAlbumList(url, 30, cookie)
+                val shelves = if (items.isEmpty()) emptyList()
+                else listOf(
+                    Shelf.Lists.Items(
+                        id = "$path-p$page",
+                        title = if (page == 1) "Album" else "Pagina $page",
+                        list = items,
+                    )
+                )
+                shelves to (items.size >= 30)
+            }.toFeedData()
         }
 
     private suspend fun albumsShelf(
@@ -300,19 +316,19 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
             id = id,
             title = title,
             list = albums,
-            more = if (paged) pagedAlbums(path, cookie) else null,
+            more = if (paged) albumsMoreFeed(path, cookie) else null,
         )
     }
 
     /** Le 24 console caricate a gruppi di 8 (scroll infinito tra le console) */
-    private fun pagedConsoleShelves(): PagedData<Shelf> = PagedData.Suspend { key ->
-        val start = (key?.toIntOrNull() ?: 0) * 8
+    private fun pagedConsoleShelves(): PagedData<Shelf> = continuousPaged { page ->
+        val start = (page - 1) * 8
         val end = minOf(start + 8, platforms.size)
         val shelves = platforms.subList(start, end).mapNotNull { (name, path) ->
             runCatching { albumsShelf("console_${path.substringAfterLast('/')}", name, path, 12, paged = true) }
                 .getOrNull()
         }
-        shelves to if (end < platforms.size) ((start / 8) + 1).toString() else null
+        shelves to (end < platforms.size)
     }
 
     // ---------- HOME ----------
@@ -368,7 +384,7 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
             return listOf(
                 User(
                     id = "khinsider",
-                    title = "Khinsider",
+                    name = "Khinsider",
                     subtitle = "Account khinsider",
                     extras = mapOf("cookie" to cookie),
                 )
