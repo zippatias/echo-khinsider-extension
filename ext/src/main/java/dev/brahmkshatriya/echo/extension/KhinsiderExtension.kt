@@ -3,6 +3,7 @@ package dev.brahmkshatriya.echo.extension
 import dev.brahmkshatriya.echo.common.clients.AlbumClient
 import dev.brahmkshatriya.echo.common.clients.ExtensionClient
 import dev.brahmkshatriya.echo.common.clients.HomeFeedClient
+import dev.brahmkshatriya.echo.common.clients.LibraryFeedClient
 import dev.brahmkshatriya.echo.common.clients.SearchFeedClient
 import dev.brahmkshatriya.echo.common.clients.TrackClient
 import dev.brahmkshatriya.echo.common.helpers.ContinuationCallback.Companion.await
@@ -31,7 +32,7 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.net.URLEncoder
 
-class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, AlbumClient, TrackClient {
+class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, AlbumClient, TrackClient, LibraryFeedClient {
 
     private val client = OkHttpClient()
     private lateinit var setting: Settings
@@ -172,6 +173,7 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
     }
 
     override suspend fun loadHomeFeed(): Feed<Shelf> = latestShelves().toFeed()
+    override suspend fun loadLibraryFeed(): Feed<Shelf> = emptyList<Shelf>().toFeed()
 
     // ---------- Ricerca ----------
 
