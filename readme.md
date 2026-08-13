@@ -6,7 +6,7 @@ colonne sonore di videogiochi dal sito khinsider (mirror khinsider.squid.wtf).
 ## Funzionalità
 - **Home**: ultimi arrivi da khinsider
 - **Ricerca**: cerca album per titolo
-- **Album**: apri un album e riproduci le tracce MP3
+- **Album**: apri un album e riproduci le tracce in formato MP3 o FLAC
 - **Libreria**: attraverso la funzionalità di login, visiona gli ultimi album ascoltati dal sito di khinsider.com e gli album preferiti (funzionalità ancora limitate) 
 
 ## Installazione
