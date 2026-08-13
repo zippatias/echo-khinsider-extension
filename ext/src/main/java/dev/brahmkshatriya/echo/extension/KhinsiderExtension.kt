@@ -373,20 +373,22 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
 
         // ---------- LOGIN ----------
 
+       // ---------- LOGIN ----------
+
     private var user: User? = null
     private var cookie: String? = null
 
     override val webViewRequest = object : WebViewRequest.Cookie<List<User>> {
         override val dontCache = true
         override val initialUrl = "https://downloads.khinsider.com/forums/login".toGetRequest()
-        // Si ferma quando lasciamo la pagina di login (login completato)
+        // Si ferma quando lasciamo la pagina di login (login completato o reindirizzato)
         override val stopUrlRegex = Regex("""https://downloads\.khinsider\.com/(?!forums/login(?:\?|/|$)).*""")
         override suspend fun onStop(url: NetworkRequest, cookie: String): List<User> {
-            val isLogged = cookie.contains("member_id") ||
-                cookie.contains("pass_hash") ||
-                cookie.contains("session_id") ||
-                cookie.contains("ips4_")
-            if (!isLogged) throw Exception("Login non riuscito: nessun cookie di sessione khinsider trovato")
+            val loggedIn = verifySession(cookie)
+            if (!loggedIn) {
+                val preview = cookie.take(120)
+                throw Exception("Login non riuscito: impossibile verificare la sessione. Cookie ricevuti: $preview")
+            }
             return listOf(
                 User(
                     id = "khinsider",
@@ -397,6 +399,20 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
             )
         }
     }
+
+    /** Verifica reale: /cp/favorites risponde 200 solo se loggati (302 = reindirizzato al login) */
+    private suspend fun verifySession(cookie: String): Boolean = runCatching {
+        val request = Request.Builder()
+            .url("https://downloads.khinsider.com/cp/favorites")
+            .header("User-Agent", "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/120.0 Mobile Safari/537.36")
+            .header("Cookie", cookie)
+            .followRedirects(false)
+            .build()
+        val response = client.newCall(request).await()
+        val code = response.code
+        response.close()
+        code == 200
+    }.getOrDefault(false)
 
     override fun setLoginUser(user: User?) {
         this.user = user
