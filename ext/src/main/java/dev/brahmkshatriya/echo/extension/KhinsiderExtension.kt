@@ -438,18 +438,18 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
      */
     private fun consoleMoreFeed(path: String): Feed<Shelf> =
         Feed(emptyList()) {
-            PagedData.Continuous { key ->
+            PagedData.Continuous<Shelf> { key ->
                 val parts = key?.split("_") ?: listOf("1", "42")
                 val sitePage = parts[0].toIntOrNull() ?: 1
                 val offset = parts.getOrNull(1)?.toIntOrNull() ?: 0
                 val url = if (sitePage == 1) "$KHI$path" else "$KHI$path?page=$sitePage"
                 val items = scrapeAlbumList(url, 30, null, offset)
                 val next = when {
-                    items.size >= 30 -> "$sitePage_${offset + 30}"
+                    items.size >= 30 -> "${sitePage}_${offset + 30}"
                     items.isNotEmpty() -> "${sitePage + 1}_0"
                     else -> null
                 }
-                val shelves = if (items.isEmpty()) emptyList()
+                val shelves = if (items.isEmpty()) emptyList<Shelf>()
                 else listOf(
                     Shelf.Lists.Items(
                         id = "console-${path.substringAfterLast('/')}-p$sitePage-$offset",
@@ -457,7 +457,7 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
                         list = items,
                     )
                 )
-                shelves to (next != null || shelves.isNotEmpty())
+                Page(shelves, next)
             }.toFeedData()
         }
 
