@@ -270,11 +270,12 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
                 .replace("&#39;", "'").replace("&lt;", "<").replace("&gt;", ">")
             val cover = Regex("""<img[^>]+src="([^"]+)"[^>]*>""").find(inner)?.groupValues?.get(1)
                 ?.let { if (it.startsWith("http")) it else "$KHI$it" }
-            albums[slug] = Album(
-                id = slug,
+                albums[slug] = Album(
+                id = "/game-soundtracks/album/$slug",
                 title = title.ifBlank { slug.replace('-', ' ') },
-                cover = cover?.toImageHolder(),
+                cover = cover?.let { imageUrl(it)?.toImageHolder() },
             )
+
             if (albums.size >= limit) break
         }
         return albums.values.toList()
@@ -372,16 +373,17 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
 
     // ---------- LOGIN ----------
 
-    private var user: User? = null
-    private var cookie: String? = null
-
     override val webViewRequest = object : WebViewRequest.Cookie<List<User>> {
         override val dontCache = true
         override val initialUrl = "https://downloads.khinsider.com/forums/login".toGetRequest()
-        // Si ferma quando il login è completato (non è più sulla pagina di login)
-        override val stopUrlRegex = Regex("""https://downloads\.khinsider\.com/(?!forums/login).*""")
+        // Si ferma quando lasciamo la pagina di login (login completato)
+        override val stopUrlRegex = Regex("""https://downloads\.khinsider\.com/(?!forums/login(?:\?|/|$)).*""")
         override suspend fun onStop(url: NetworkRequest, cookie: String): List<User> {
-            if (!cookie.contains("member_id")) throw Exception("Login non riuscito")
+            val isLogged = cookie.contains("member_id") ||
+                cookie.contains("pass_hash") ||
+                cookie.contains("session_id") ||
+                cookie.contains("ips4_")
+            if (!isLogged) throw Exception("Login non riuscito: nessun cookie di sessione khinsider trovato")
             return listOf(
                 User(
                     id = "khinsider",
@@ -392,13 +394,6 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
             )
         }
     }
-
-    override fun setLoginUser(user: User?) {
-        this.user = user
-        this.cookie = user?.extras?.get("cookie")
-    }
-
-    override suspend fun getCurrentUser(): User? = user
 
     // ---------- LIBRERIA ----------
 
