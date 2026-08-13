@@ -31,6 +31,9 @@ import dev.brahmkshatriya.echo.common.models.User
 import dev.brahmkshatriya.echo.common.settings.Setting
 import dev.brahmkshatriya.echo.common.settings.Settings
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
@@ -51,6 +54,7 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
     private val noRedirectClient = OkHttpClient.Builder().followRedirects(false).build()
     private lateinit var setting: Settings
     private val audioCache = mutableMapOf<String, String>()
+    private val coverCache = mutableMapOf<String, String>()   // albumId -> URL copertina media
     private val UA = "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/120.0 Mobile Safari/537.36"
 
     override suspend fun getSettingItems(): List<Setting> = emptyList()
@@ -87,7 +91,7 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
 
     private fun imageUrl(raw: String?): String? {
         if (raw.isNullOrBlank()) return null
-        val target = raw.replace("/thumbs_small/", "/thumbs/")
+        val target = raw.replace("/thumbs_small/", "/thumbs/")   // piccola -> media
         return apiUrl("/api/image", mapOf("url" to target))
     }
 
@@ -261,6 +265,66 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
         return response.body?.string() ?: ""
     }
 
+    /**
+     * Cerca la copertina di un album: prima dentro l'anchor (caso più semplice),
+     * poi nell'intera riga di tabella che contiene il link (la copertina è in una
+     * cella diversa da quella del titolo) e infine in una finestra attorno al link.
+     */
+    private fun coverFromContext(html: String, matchStart: Int, matchEnd: Int): String? {
+        val trStart = html.lastIndexOf("<tr", matchStart)
+        val trEnd = html.indexOf("</tr>", matchEnd)
+        val region = if (trStart >= 0 && trEnd > matchEnd) {
+            html.substring(trStart, trEnd)
+        } else {
+            html.substring(maxOf(0, matchStart - 1200), minOf(html.length, matchEnd + 1200))
+        }
+        val imgs = Regex("""<img[^>]+src="([^"]+)"""", RegexOption.IGNORE_CASE)
+            .findAll(region).map { it.groupValues[1] }.toList()
+        // Preferisce le immagini di copertina (path con "soundtracks" o "thumbs"),
+        // per non prendere per sbaglio loghi o icone della pagina.
+        return imgs.lastOrNull { it.contains("soundtracks", true) || it.contains("thumbs", true) }
+    }
+
+    /** Copertina media dal mirror API, con cache in memoria. */
+    private suspend fun coverFromApi(id: String): String? {
+        synchronized(coverCache) {
+            coverCache[id]?.let { return it.ifEmpty { null } }
+        }
+        val cover = runCatching {
+            val json = getJson(apiUrl("/api/album", mapOf("url" to id))).jsonObject
+            // imagesThumbs è già in formato medio (/thumbs/). Fallback: coverUrl
+            // a piena risoluzione, in cui inseriamo "/thumbs/" dopo lo slug.
+            json["imagesThumbs"]?.jsonArray?.firstOrNull()?.jsonPrimitive?.content
+                ?: json["coverUrl"]?.jsonPrimitive?.content?.let {
+                    Regex("""(soundtracks/[^/]+)/""").replace(it, "$1/thumbs/")
+                }
+        }.getOrNull()
+        synchronized(coverCache) {
+            coverCache[id] = cover ?: ""
+        }
+        return cover
+    }
+
+    /**
+     * Completa le copertine mancanti usando il mirror API, con richieste in parallelo
+     * (a gruppi di 6). Se tutte le copertine ci sono già, non fa nessuna richiesta.
+     */
+    private suspend fun enrichWithCovers(albums: List<Album>): List<Album> {
+        if (albums.none { it.cover == null }) return albums
+        return coroutineScope {
+            albums.chunked(6).flatMap { chunk ->
+                chunk.map { album ->
+                    async {
+                        if (album.cover != null) album
+                        else coverFromApi(album.id)?.let { url ->
+                            album.copy(cover = imageUrl(url)?.toImageHolder())
+                        } ?: album
+                    }
+                }.awaitAll()
+            }
+        }
+    }
+
     private suspend fun scrapeAlbumList(url: String, limit: Int = 30, cookie: String? = null): List<Album> {
         val html = runCatching { khinsiderGet(url, cookie) }.getOrDefault("")
         val albums = LinkedHashMap<String, Album>()   // niente duplicati
@@ -272,7 +336,9 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
                 .replace(Regex("""\s+"""), " ").trim()
                 .replace("&amp;", "&").replace("&quot;", "\"")
                 .replace("&#39;", "'").replace("&lt;", "<").replace("&gt;", ">")
-            val cover = Regex("""<img[^>]+src="([^"]+)"[^>]*>""").find(inner)?.groupValues?.get(1)
+            val coverInAnchor = Regex("""<img[^>]+src="([^"]+)"""", RegexOption.IGNORE_CASE)
+                .find(inner)?.groupValues?.get(1)
+            val cover = (coverInAnchor ?: coverFromContext(html, match.range.first, match.range.last + 1))
                 ?.let { if (it.startsWith("http")) it else "$KHI$it" }
             albums[slug] = Album(
                 id = "/game-soundtracks/album/$slug",
@@ -282,7 +348,8 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
 
             if (albums.size >= limit) break
         }
-        return albums.values.toList()
+        // Le pagine "Top 100..." non hanno immagini: le prendiamo dal mirror API.
+        return enrichWithCovers(albums.values.toList())
     }
 
     /** Paginazione di Echo 1.0: Continuous carica le pagine una dopo l'altra */
