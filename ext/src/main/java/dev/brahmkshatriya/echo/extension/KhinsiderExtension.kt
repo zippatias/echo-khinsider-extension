@@ -371,7 +371,10 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
         }
     }
 
-    // ---------- LOGIN ----------
+        // ---------- LOGIN ----------
+
+    private var user: User? = null
+    private var cookie: String? = null
 
     override val webViewRequest = object : WebViewRequest.Cookie<List<User>> {
         override val dontCache = true
@@ -394,6 +397,13 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
             )
         }
     }
+
+    override fun setLoginUser(user: User?) {
+        this.user = user
+        this.cookie = user?.extras?.get("cookie")
+    }
+
+    override suspend fun getCurrentUser(): User? = user
 
     // ---------- LIBRERIA ----------
 
