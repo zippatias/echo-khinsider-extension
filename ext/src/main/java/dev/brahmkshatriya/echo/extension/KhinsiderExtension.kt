@@ -164,10 +164,10 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
             listOf(Artist(id = it, name = it))
         } ?: emptyList()
         val albumModel = Album(id = album.id, title = albumTitle, cover = cover)
-        val hasFlac = runCatching {
+                val hasFlac = runCatching {
             this["availableFormats"]?.jsonArray?.any {
                 it.jsonPrimitive.content.equals("flac", true)
-            }
+            } ?: false
         }.getOrDefault(false)
         val tracks = runCatching { this["tracks"]?.jsonArray }.getOrNull() ?: return emptyList()
         return tracks.mapNotNull { item ->
