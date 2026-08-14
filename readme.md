@@ -14,3 +14,6 @@ colonne sonore di videogiochi dal sito khinsider (mirror khinsider.squid.wtf).
 2. Scarica il file `.eapk` più recente
 3. Installalo sul telefono (consenti l'installazione da fonti sconosciute)
 4. Apri Echo: l'estensione "Khinsider" apparirà nell'elenco delle estensioni
+
+## Ringraziamenti
+Un sentito grazie a @Sborrykid per avermi aiutato a capire come si usa GitHub
