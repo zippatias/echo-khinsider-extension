@@ -46,6 +46,7 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
+import kotlin.math.absoluteValue
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.net.URLDecoder
@@ -770,12 +771,12 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
             html.contains("/forums/login") || html.contains(">Log In")
         val favs = if (loggedOut) emptyList() else parseAlbumList(html, 30)
 
-        // Posizione di ogni album e di ogni albumid="NNN" nella pagina: a ogni
-        // album assegniamo l'albumid più vicino (di solito quello della sua riga).
+        // Posizione di ogni album e di ogni albumid nella pagina (con o senza
+        // virgolette): a ogni album assegniamo l'albumid più vicino (la sua riga).
         val albumPos = albumLinkRegex.findAll(html)
             .map { it.range.first to "/game-soundtracks/album/${it.groupValues[1].trim()}" }
             .toList()
-        val idPos = Regex("""albumid\s*=\s*["'](\d+)""", RegexOption.IGNORE_CASE).findAll(html)
+        val idPos = Regex("""albumid\s*=\s*["']?(\d+)""", RegexOption.IGNORE_CASE).findAll(html)
             .map { it.range.first to it.groupValues[1] }
             .toList()
 
@@ -794,7 +795,7 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
     }
 
     /**
-     * L'endpoint di toggle usa l'albumid NUMERICO (es. 70421), che non è nei dati
+     * L'endpoint di toggle usa l'albumid NUMERICO (es. 102359), che non è nei dati
      * del mirror API: lo cerchiamo prima nella mappa ricavata da /cp/favorites,
      * poi nella pagina album del sito (con più pattern e cache LRU).
      */
@@ -812,23 +813,32 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
 
     /**
      * Cerca l'albumid numerico nella pagina album. La stellina è solo
-     * <i class="material-icons">favorite_border</i>: l'id deve essere in un
-     * elemento vicino (attributo), in una variabile JS o in una chiamata JS.
+     * <i class="material-icons">favorite_border</i> e il click fa
+     * $.get('/cp/album_favorite_toggle', {albumid: N}) con N iniettato da PHP:
+     * il posto affidabile in cui l'id compare nell'HTML è il link di modifica
+     * /cp/edit_album_details?albumid=N (senza virgolette).
      */
     private fun findAlbumIdInPage(html: String): String? {
-        // 1) Link/URL letterale del toggle (se il bottone è un <a href=...>)
+        // 1) URL letterale del toggle, se il bottone fosse un link diretto
         Regex("""album_favorite_toggle\?albumid=(\d+)""").find(html)?.let { return it.groupValues[1] }
-        // 2) Attributo albumid="NNN" (lo stile usato dal sito, es. sulle icone)
+        // 2) Parametro query "albumid=NNN" senza virgolette: il link di modifica
+        //    /cp/edit_album_details?albumid=102359 è presente in ogni pagina album
+        Regex("""albumid=(\d+)""", RegexOption.IGNORE_CASE).find(html)?.let { return it.groupValues[1] }
+        // 3) Attributo con virgolette, come sulle icone di /cp/favorites (albumid="70421")
         Regex("""albumid\s*=\s*["'](\d+)""", RegexOption.IGNORE_CASE).find(html)?.let { return it.groupValues[1] }
-        // 3) Attributo data-album-id / data-albumid
+        // 4) Attributo data-album-id / data-albumid
         Regex("""data-album-?id\s*=\s*["']?(\d+)""", RegexOption.IGNORE_CASE).find(html)?.let { return it.groupValues[1] }
-        // 4) Input nascosto di un form
+        // 5) Input nascosto di un form
         Regex("""name=["']albumid["'][^>]*?value=["'](\d+)""", RegexOption.IGNORE_CASE).find(html)?.let { return it.groupValues[1] }
         Regex("""value=["'](\d+)["'][^>]*?name=["']albumid["']""", RegexOption.IGNORE_CASE).find(html)?.let { return it.groupValues[1] }
-        // 5) Variabile JS tipo: var album_id = 70421;
-        Regex("""(?:album_?id|ALBUM_ID)\s*[:=]\s*["']?(\d{4,7})""").find(html)?.let { return it.groupValues[1] }
-        // 6) Chiamata JS tipo: toggleFavorite(70421) / setFav(70421)
+        // 6) Variabile/oggetto JS tipo: {albumid:102359} o var album_id = 102359;
+        Regex("""(?:album_?id|ALBUM_ID)\s*[:=]\s*["']?(\d{4,7})""", RegexOption.IGNORE_CASE).find(html)?.let { return it.groupValues[1] }
+        // 7) Chiamata JS tipo: toggleFavorite(102359) / setFav(102359)
         Regex("""(?:favorite|fav)\w*\s*\(\s*["']?(\d{4,7})""", RegexOption.IGNORE_CASE).find(html)?.let { return it.groupValues[1] }
+        // 8) Ultima spiaggia: il JS del sito è impacchettato e l'albumid compare come
+        //    token del dizionario subito dopo "album_favorite_toggle"
+        //    (es. ...|album_favorite_toggle|102359|albumFavorite|...)
+        Regex("""album_favorite_toggle\|(\d{4,7})""").find(html)?.let { return it.groupValues[1] }
         return null
     }
 
