@@ -29,8 +29,8 @@ import dev.brahmkshatriya.echo.common.models.Tab
 import dev.brahmkshatriya.echo.common.models.Track
 import dev.brahmkshatriya.echo.common.models.User
 import dev.brahmkshatriya.echo.common.settings.Setting
+import dev.brahmkshatriya.echo.common.settings.SettingList
 import dev.brahmkshatriya.echo.common.settings.Settings
-import dev.brahmkshatriya.echo.common.settings.SettingSwitch
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -55,21 +55,64 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
     private val noRedirectClient = OkHttpClient.Builder().followRedirects(false).build()
     private var setting: Settings? = null
     private val audioCache = mutableMapOf<String, String>()
-    private val coverCache = mutableMapOf<String, String>()          // albumId -> URL copertina media
+    private val coverCache = mutableMapOf<String, String>()          // albumId -> URL originale (taglia applicata all'uso)
     private val coverEnrichLimit = 30                                 // max copertine dal mirror per scaffale
     private val UA = "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/120.0 Mobile Safari/537.36"
 
-    override suspend fun getSettingItems(): List<Setting> = listOf(
-        SettingSwitch(
-            "Copertine ad alta risoluzione",
-            "high_res_covers",
-            "Usa le immagini originali (grandi) per la pagina album e per i brani. Disattiva per immagini medie, più leggere e veloci da caricare.",
-            highResCovers,
-        )
-    )
+    // ---------- Impostazioni copertine ----------
 
-    /** True = copertine originali per album e brani; False = medie (/thumbs/). */
-    private val highResCovers get() = setting?.getBoolean("high_res_covers") ?: true
+    override suspend fun getSettingItems(): List<Setting> {
+        val options = listOf("Piccola", "Media", "Grande")
+        val values = listOf("small", "medium", "full")
+        return listOf(
+            SettingList(
+                "Copertine nelle liste",
+                "cover_size_shelves",
+                "Home, Top, Console, Tipi, Libreria e Ricerca. Piccola è la più veloce da caricare, Grande è l'immagine originale.",
+                options,
+                values,
+                sizeIndex(shelfCoverSize),
+            ),
+            SettingList(
+                "Copertina pagina album",
+                "cover_size_album",
+                "L'immagine grande mostrata quando apri un album.",
+                options,
+                values,
+                sizeIndex(albumCoverSize),
+            ),
+            SettingList(
+                "Copertine dei brani",
+                "cover_size_tracks",
+                "Le miniature nella lista tracce e l'immagine nella schermata di riproduzione.",
+                options,
+                values,
+                sizeIndex(trackCoverSize),
+            ),
+        )
+    }
+
+    private val shelfCoverSize get() = sizeSetting("cover_size_shelves", "medium")
+    private val albumCoverSize get() = sizeSetting("cover_size_album", "full")
+    private val trackCoverSize get() = sizeSetting("cover_size_tracks", "full")
+
+    /** Legge la taglia salvata, con fallback sul valore di default. */
+    private fun sizeSetting(id: String, default: String): String {
+        val raw = runCatching { setting?.getString(id) }.getOrNull()
+        return when (raw) {
+            "small", "medium", "full" -> raw
+            "0" -> "small"   // vecchi valori salvati come indice
+            "1" -> "medium"
+            "2" -> "full"
+            else -> default
+        }
+    }
+
+    private fun sizeIndex(value: String): Int = when (value) {
+        "small" -> 0
+        "full" -> 2
+        else -> 1
+    }
 
     override fun setSettings(settings: Settings) {
         setting = settings
@@ -101,27 +144,24 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
         return response.body?.string() ?: throw Exception("Risposta vuota")
     }
 
-    /** Copertina MEDIA (/thumbs/) via proxy: usata per liste, scaffali e ricerca. */
-    private fun imageUrl(raw: String?): String? {
+    /**
+     * URL immagine via proxy del mirror, nella dimensione richiesta:
+     * "small" = /thumbs_small/, "medium" = /thumbs/, "full" = originale.
+     * La stessa taglia produce sempre lo stesso URL: se due impostazioni
+     * coincidono, Echo riusa l'immagine già scaricata (cache per URL).
+     */
+    private fun imageUrl(raw: String?, size: String): String? {
         if (raw.isNullOrBlank()) return null
-        val target = when {
-            raw.contains("/thumbs_small/") -> raw.replace("/thumbs_small/", "/thumbs/")
-            raw.contains("/thumbs/") -> raw
-            // cover a piena risoluzione: inserisce /thumbs/ dopo lo slug
-            else -> Regex("""(soundtracks/[^/]+)/""").replace(raw, "$1/thumbs/")
+        // Toglie l'eventuale segmento di dimensione già presente, così qualsiasi
+        // sorgente (HTML, API) viene normalizzata prima di applicare la taglia.
+        val clean = raw.replace("/thumbs_small/", "/").replace("/thumbs/", "/")
+        val target = when (size) {
+            "small" -> Regex("""(soundtracks/[^/]+)/""").replace(clean, "$1/thumbs_small/")
+            "full" -> clean
+            else -> Regex("""(soundtracks/[^/]+)/""").replace(clean, "$1/thumbs/")
         }
         return apiUrl("/api/image", mapOf("url" to target))
     }
-
-    /** Copertina ORIGINALE (alta risoluzione) via proxy: per la pagina album e i brani. */
-    private fun imageUrlFull(raw: String?): String? {
-        if (raw.isNullOrBlank()) return null
-        return apiUrl("/api/image", mapOf("url" to raw))
-    }
-
-    /** Sceglie alta o media in base all'impostazione utente. */
-    private fun albumImageUrl(raw: String?): String? =
-        if (highResCovers) imageUrlFull(raw) else imageUrl(raw)
 
     private fun downloadUrl(target: String): String =
         apiUrl("/api/download", mapOf("url" to target))
@@ -175,7 +215,7 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
     private fun JsonObject.toAlbumItem(): Album? {
         val title = str("title")?.takeIf { it.isNotBlank() } ?: return null
         val id = albumPathOf(str("albumId") ?: str("id") ?: str("url")) ?: return null
-        val cover = imageUrl(str("icon") ?: str("image"))?.toImageHolder()
+        val cover = imageUrl(str("icon") ?: str("image"), shelfCoverSize)?.toImageHolder()
         val subtitle = listOfNotNull(str("albumType"), str("year")).joinToString(" • ").ifBlank { null }
         return Album(id = id, title = title, cover = cover, subtitle = subtitle)
     }
@@ -183,7 +223,7 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
     private fun JsonObject.toAlbumDetails(album: Album): Album {
         val title = str("name") ?: album.title
         val year = str("year")
-        val cover = albumImageUrl(str("coverUrl"))?.toImageHolder() ?: album.cover
+        val cover = imageUrl(str("coverUrl"), albumCoverSize)?.toImageHolder() ?: album.cover
         val artistName = str("albumArtist")
         val artists = artistName?.takeIf { it.isNotBlank() }?.let {
             listOf(Artist(id = it, name = it))
@@ -203,7 +243,7 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
 
     private fun JsonObject.toTracks(album: Album): List<Track> {
         val albumTitle = str("name") ?: album.title
-        val cover = albumImageUrl(str("coverUrl"))?.toImageHolder() ?: album.cover
+        val cover = imageUrl(str("coverUrl"), trackCoverSize)?.toImageHolder() ?: album.cover
         val artistName = str("albumArtist")
         val artists = artistName?.takeIf { it.isNotBlank() }?.let {
             listOf(Artist(id = it, name = it))
@@ -313,15 +353,15 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
         return imgs.lastOrNull { it.contains("soundtracks", true) || it.contains("thumbs", true) }
     }
 
-    /** Copertina media dal mirror API, con cache in memoria. */
+    /** Copertina originale dal mirror API, con cache in memoria (taglia applicata all'uso). */
     private suspend fun coverFromApi(id: String): String? {
         synchronized(coverCache) {
             coverCache[id]?.let { return it.ifEmpty { null } }
         }
         val cover = runCatching {
             val json = getJson(apiUrl("/api/album", mapOf("url" to id))).jsonObject
-            json["imagesThumbs"]?.jsonArray?.firstOrNull()?.jsonPrimitive?.content
-                ?: json["coverUrl"]?.jsonPrimitive?.content
+            json["coverUrl"]?.jsonPrimitive?.content
+                ?: json["imagesThumbs"]?.jsonArray?.firstOrNull()?.jsonPrimitive?.content
         }.getOrNull()
         synchronized(coverCache) {
             coverCache[id] = cover ?: ""
@@ -343,7 +383,7 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
                     chunk.map { album ->
                         async {
                             coverFromApi(album.id)?.let { url ->
-                                album.copy(cover = imageUrl(url)?.toImageHolder())
+                                album.copy(cover = imageUrl(url, shelfCoverSize)?.toImageHolder())
                             } ?: album
                         }
                     }.awaitAll()
@@ -377,7 +417,7 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
             albums[slug] = Album(
                 id = "/game-soundtracks/album/$slug",
                 title = title.ifBlank { slug.replace('-', ' ') },
-                cover = cover?.let { imageUrl(it)?.toImageHolder() },
+                cover = cover?.let { imageUrl(it, shelfCoverSize)?.toImageHolder() },
             )
 
             if (albums.size >= skipFirst + limit) break
