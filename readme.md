@@ -16,4 +16,4 @@ colonne sonore di videogiochi dal sito khinsider (mirror khinsider.squid.wtf).
 4. Apri Echo: l'estensione "Khinsider" apparirà nell'elenco delle estensioni
 
 ## Ringraziamenti
-Un sentito grazie a @Sborrykid per avermi aiutato a finalizzare il progetto e per avermi aiutato a capire come si usa GitHub
+Un sentito ringraziamento a [@Sborrykid](https://github.com/Sborrykid) per avermi aiutato a finalizzare il progetto e per avermi aiutato a capire come si usa GitHub
