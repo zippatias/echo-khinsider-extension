@@ -70,7 +70,7 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
 
     // ---------- Cronologia locale (volatile, in memoria) ----------
     private val localHistory = LinkedHashMap<String, Pair<Long, Album>>()   // id -> (timestamp, album)
-    private const val historyMax = 40
+    private val historyMax = 40
 
     // ---------- Impostazioni copertine ----------
 
