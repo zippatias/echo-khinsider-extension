@@ -66,6 +66,7 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
     // ---------- Preferiti (sito) ----------
     private val favoriteSlugs = mutableSetOf<String>()          // id album (slug) attualmente nei preferiti
     private val slugToAlbumId = mutableMapOf<String, String>()  // slug -> albumid numerico (dai preferiti del sito)
+    private val cachedFavorites = mutableListOf<Album>()        // lista completa dei preferiti per la Libreria (cache)
     private var favoritesLoaded = false                          // set già sincronizzato con /cp/favorites?
     private val albumIdCache = object : LinkedHashMap<String, String>(16, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?): Boolean = size > 20
@@ -663,6 +664,7 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
         // Cambio utente/logout: la prossima volta i preferiti verranno riscaricati.
         synchronized(favoriteSlugs) {
             favoriteSlugs.clear()
+            cachedFavorites.clear()
             favoritesLoaded = false
         }
     }
@@ -761,41 +763,78 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
         refreshFavorites(c)
     }
 
-    /**
-     * Sincronizza lo stato locale con /cp/favorites. Nella pagina ogni album ha
-     * l'icona di rimozione con l'albumid numerico come attributo:
-     *   <i class="material-icons albumDelete" albumid="70421">delete_forever</i>
-     * quindi qui costruiamo anche la mappa slug -> albumid, così rimuovere un
-     * preferito non richiede di scaricare la pagina album.
-     * Restituisce gli album della pagina per riusarli nella sezione Libreria.
-     */
-    private suspend fun refreshFavorites(c: String): List<Album> {
-        val html = runCatching { khinsiderGet("$KHI/cp/favorites", c) }.getOrDefault("")
-        val loggedOut = html.contains("need to be registered and logged in") ||
-            html.contains("/forums/login") || html.contains(">Log In")
-        val favs = if (loggedOut) emptyList() else parseAlbumList(html, 30)
-
-        // Posizione di ogni album e di ogni albumid nella pagina (con o senza
-        // virgolette): a ogni album assegniamo l'albumid più vicino (la sua riga).
+    /** Estrae album + mappa slug->albumid da UNA pagina di /cp/favorites. */
+    private fun parseFavoritesPage(html: String): Pair<List<Album>, Map<String, String>> {
+        val favs = parseAlbumList(html, Int.MAX_VALUE)   // TUTTI gli album della pagina, niente limite 30
         val albumPos = albumLinkRegex.findAll(html)
             .map { it.range.first to "/game-soundtracks/album/${it.groupValues[1].trim()}" }
             .toList()
         val idPos = Regex("""albumid\s*=\s*["']?(\d+)""", RegexOption.IGNORE_CASE).findAll(html)
             .map { it.range.first to it.groupValues[1] }
             .toList()
+        val map = mutableMapOf<String, String>()
+        for ((pos, slugPath) in albumPos) {
+            idPos.minByOrNull { (it.first - pos).absoluteValue }?.second?.let { map[slugPath] = it }
+        }
+        return favs to map
+    }
 
+    /**
+     * Sincronizza lo stato locale con /cp/favorites scaricando TUTTE le pagine
+     * (il sito pagina la lista: "Page 1 of N" con link ?page=N). Oltre la prima
+     * pagina gli album resterebbero invisibili in Libreria e col cuore spento.
+     * Se il sito non paginasse, il comportamento resta identico a prima.
+     * Restituisce la lista completa per la sezione Libreria.
+     */
+    private suspend fun refreshFavorites(c: String): List<Album> {
+        synchronized(favoriteSlugs) { if (favoritesLoaded) return cachedFavorites.toList() }
+
+        val allAlbums = LinkedHashMap<String, Album>()
+        val slugToId = mutableMapOf<String, String>()
+        var page = 1
+        var maxPage = 1
+        var first = true
+        while (true) {
+            val url = if (page == 1) "$KHI/cp/favorites" else "$KHI/cp/favorites?page=$page"
+            val html = runCatching { khinsiderGet(url, c) }.getOrDefault("")
+            val loggedOut = html.contains("need to be registered and logged in") ||
+                html.contains("/forums/login") || html.contains(">Log In")
+            if (loggedOut) {
+                synchronized(favoriteSlugs) {
+                    favoriteSlugs.clear()
+                    slugToAlbumId.clear()
+                    cachedFavorites.clear()
+                    favoritesLoaded = true
+                }
+                return emptyList()
+            }
+            if (first) {
+                first = false
+                maxPage = Regex("""Page\s+\d+\s+of\s+(\d+)""", RegexOption.IGNORE_CASE)
+                    .find(html)?.groupValues?.get(1)?.toIntOrNull()
+                    ?: Regex("""\?page=(\d+)""").findAll(html)
+                        .mapNotNull { it.groupValues[1].toIntOrNull() }.maxOrNull()
+                    ?: 1
+                maxPage = maxPage.coerceIn(1, 25)   // cap di sicurezza anti-loop
+            }
+            val (favs, ids) = parseFavoritesPage(html)
+            favs.forEach { allAlbums.putIfAbsent(it.id, it) }
+            slugToId.putAll(ids)
+            if (page >= maxPage) break
+            page++
+        }
+
+        val result = allAlbums.values.toList()
         synchronized(favoriteSlugs) {
             favoriteSlugs.clear()
-            favoriteSlugs.addAll(favs.map { it.id })
+            favoriteSlugs.addAll(result.map { it.id })
             slugToAlbumId.clear()
-            for ((pos, slugPath) in albumPos) {
-                idPos.minByOrNull { (it.first - pos).absoluteValue }?.second?.let {
-                    slugToAlbumId[slugPath] = it
-                }
-            }
+            slugToAlbumId.putAll(slugToId)
+            cachedFavorites.clear()
+            cachedFavorites.addAll(result)
             favoritesLoaded = true
         }
-        return favs
+        return result
     }
 
     /**
@@ -876,8 +915,10 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
             if (should) {
                 favoriteSlugs.add(item.id)
                 slugToAlbumId[item.id] = albumId   // per i prossimi "rimuovi" senza rifetch
+                if (cachedFavorites.none { it.id == item.id }) cachedFavorites.add(0, item as Album)
             } else {
                 favoriteSlugs.remove(item.id)
+                cachedFavorites.removeAll { it.id == item.id }
             }
         }
     }
@@ -895,7 +936,7 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
     override suspend fun onShare(item: EchoMediaItem): String {
         val path = item.id
         return if (path.startsWith("http")) path else "$KHI$path"
-}
+    }
 
     // ---------- CRONOLOGIA (locale + sito integrate) ----------
 
@@ -1076,7 +1117,7 @@ object FuzzyIndex {
         }
         return scored.sortedByDescending { it.first }
             .take(limit)
-                        .map { (_, e) -> Album(e.id, e.title, isLikeable = true, isShareable = true) }
+            .map { (_, e) -> Album(e.id, e.title, isLikeable = true, isShareable = true) }
     }
 
     private fun normalize(s: String): String {
