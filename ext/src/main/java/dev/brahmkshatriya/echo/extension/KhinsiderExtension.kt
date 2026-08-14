@@ -7,6 +7,7 @@ import dev.brahmkshatriya.echo.common.clients.LibraryFeedClient
 import dev.brahmkshatriya.echo.common.clients.LikeClient
 import dev.brahmkshatriya.echo.common.clients.LoginClient
 import dev.brahmkshatriya.echo.common.clients.SaveClient
+import dev.brahmkshatriya.echo.common.clients.ShareClient
 import dev.brahmkshatriya.echo.common.clients.SearchFeedClient
 import dev.brahmkshatriya.echo.common.clients.TrackClient
 import dev.brahmkshatriya.echo.common.helpers.ClientException
@@ -52,7 +53,7 @@ import okhttp3.Request
 import java.net.URLDecoder
 import java.net.URLEncoder
 
-class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, AlbumClient, TrackClient, LibraryFeedClient, LoginClient.WebView, LikeClient, SaveClient {
+class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, AlbumClient, TrackClient, LibraryFeedClient, LoginClient.WebView, LikeClient, SaveClient, ShareClient {
 
     private val client = OkHttpClient()
     private val noRedirectClient = OkHttpClient.Builder().followRedirects(false).build()
@@ -232,7 +233,7 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
         val id = albumPathOf(str("albumId") ?: str("id") ?: str("url")) ?: return null
         val cover = imageUrl(str("icon") ?: str("image"), shelfCoverSize)?.toImageHolder()
         val subtitle = listOfNotNull(str("albumType"), str("year")).joinToString(" • ").ifBlank { null }
-        return Album(id = id, title = title, cover = cover, subtitle = subtitle, isLikeable = true)
+        return Album(id = id, title = title, cover = cover, subtitle = subtitle, isLikeable = true, isShareable = true)
     }
 
     private fun JsonObject.toAlbumDetails(album: Album): Album {
@@ -254,6 +255,7 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
             description = str("description") ?: str("albumType"),
             subtitle = year?.let { "Anno: $it" },
             isLikeable = true,
+            isShareable = true,
         )
     }
 
@@ -264,7 +266,7 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
         val artists = artistName?.takeIf { it.isNotBlank() }?.let {
             listOf(Artist(id = it, name = it))
         } ?: emptyList()
-        val albumModel = Album(id = album.id, title = albumTitle, cover = cover, isLikeable = true)
+        val albumModel = Album(id = album.id, title = albumTitle, cover = cover, isLikeable = true, isShareable = true)
         val hasFlac = runCatching {
             this["availableFormats"]?.jsonArray?.any {
                 it.jsonPrimitive.content.equals("flac", true)
@@ -289,6 +291,7 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
                 cover = cover,
                 duration = parseDuration(o.str("duration")),
                 albumOrderNumber = o.str("number")?.toLongOrNull(),
+                isShareable = true,
                 streamables = streamables
             )
         }
@@ -430,6 +433,7 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
                 title = title.ifBlank { slug.replace('-', ' ') },
                 cover = cover?.let { imageUrl(it, shelfCoverSize)?.toImageHolder() },
                 isLikeable = true,
+                isShareable = true,
             )
 
             if (albums.size >= skipFirst + limit) break
@@ -886,6 +890,13 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
 
     override suspend fun isItemSaved(item: EchoMediaItem): Boolean = isFavorite(item)
 
+    // ---------- CONDIVISIONE ----------
+
+    override suspend fun onShare(item: EchoMediaItem): String {
+        val path = item.id
+        return if (path.startsWith("http")) path else "$KHI$path"
+}
+
     // ---------- CRONOLOGIA (locale + sito integrate) ----------
 
     /** Registra l'apertura di un album nella cronologia locale (in memoria, volatile). */
@@ -1065,7 +1076,7 @@ object FuzzyIndex {
         }
         return scored.sortedByDescending { it.first }
             .take(limit)
-            .map { (_, e) -> Album(e.id, e.title, isLikeable = true) }
+                        .map { (_, e) -> Album(e.id, e.title, isLikeable = true, isShareable = true) }
     }
 
     private fun normalize(s: String): String {
