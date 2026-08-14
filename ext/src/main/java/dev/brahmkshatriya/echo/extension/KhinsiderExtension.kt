@@ -4,7 +4,9 @@ import dev.brahmkshatriya.echo.common.clients.AlbumClient
 import dev.brahmkshatriya.echo.common.clients.ExtensionClient
 import dev.brahmkshatriya.echo.common.clients.HomeFeedClient
 import dev.brahmkshatriya.echo.common.clients.LibraryFeedClient
+import dev.brahmkshatriya.echo.common.clients.LikeClient
 import dev.brahmkshatriya.echo.common.clients.LoginClient
+import dev.brahmkshatriya.echo.common.clients.SaveClient
 import dev.brahmkshatriya.echo.common.clients.SearchFeedClient
 import dev.brahmkshatriya.echo.common.clients.TrackClient
 import dev.brahmkshatriya.echo.common.helpers.ClientException
@@ -49,7 +51,7 @@ import okhttp3.Request
 import java.net.URLDecoder
 import java.net.URLEncoder
 
-class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, AlbumClient, TrackClient, LibraryFeedClient, LoginClient.WebView {
+class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, AlbumClient, TrackClient, LibraryFeedClient, LoginClient.WebView, LikeClient, SaveClient {
 
     private val client = OkHttpClient()
     private val noRedirectClient = OkHttpClient.Builder().followRedirects(false).build()
@@ -58,6 +60,17 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
     private val coverCache = mutableMapOf<String, String>()          // albumId -> URL originale (taglia applicata all'uso)
     private val coverEnrichLimit = 30                                 // max copertine dal mirror per scaffale
     private val UA = "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/120.0 Mobile Safari/537.36"
+
+    // ---------- Preferiti (sito) ----------
+    private val favoriteSlugs = mutableSetOf<String>()          // id album (slug) attualmente nei preferiti
+    private var favoritesLoaded = false                          // set già sincronizzato con /cp/favorites?
+    private val albumIdCache = object : LinkedHashMap<String, String>(16, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?): Boolean = size > 20
+    }
+
+    // ---------- Cronologia locale (volatile, in memoria) ----------
+    private val localHistory = LinkedHashMap<String, Pair<Long, Album>>()   // id -> (timestamp, album)
+    private const val historyMax = 40
 
     // ---------- Impostazioni copertine ----------
 
@@ -217,7 +230,7 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
         val id = albumPathOf(str("albumId") ?: str("id") ?: str("url")) ?: return null
         val cover = imageUrl(str("icon") ?: str("image"), shelfCoverSize)?.toImageHolder()
         val subtitle = listOfNotNull(str("albumType"), str("year")).joinToString(" • ").ifBlank { null }
-        return Album(id = id, title = title, cover = cover, subtitle = subtitle)
+        return Album(id = id, title = title, cover = cover, subtitle = subtitle, isLikeable = true)
     }
 
     private fun JsonObject.toAlbumDetails(album: Album): Album {
@@ -237,7 +250,8 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
             trackCount = trackCount,
             releaseDate = year?.toIntOrNull()?.let { EchoDate(year = it, month = 1, day = 1) },
             description = str("description") ?: str("albumType"),
-            subtitle = year?.let { "Anno: $it" }
+            subtitle = year?.let { "Anno: $it" },
+            isLikeable = true,
         )
     }
 
@@ -248,7 +262,7 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
         val artists = artistName?.takeIf { it.isNotBlank() }?.let {
             listOf(Artist(id = it, name = it))
         } ?: emptyList()
-        val albumModel = Album(id = album.id, title = albumTitle, cover = cover)
+        val albumModel = Album(id = album.id, title = albumTitle, cover = cover, isLikeable = true)
         val hasFlac = runCatching {
             this["availableFormats"]?.jsonArray?.any {
                 it.jsonPrimitive.content.equals("flac", true)
@@ -418,6 +432,7 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
                 id = "/game-soundtracks/album/$slug",
                 title = title.ifBlank { slug.replace('-', ' ') },
                 cover = cover?.let { imageUrl(it, shelfCoverSize)?.toImageHolder() },
+                isLikeable = true,
             )
 
             if (albums.size >= skipFirst + limit) break
@@ -635,6 +650,11 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
     override fun setLoginUser(user: User?) {
         this.user = user
         this.cookie = user?.extras?.get("cookie")
+        // Cambio utente/logout: la prossima volta i preferiti verranno riscaricati.
+        synchronized(favoriteSlugs) {
+            favoriteSlugs.clear()
+            favoritesLoaded = false
+        }
     }
 
     override suspend fun getCurrentUser(): User? = user
@@ -722,18 +742,157 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
         return map.entries.joinToString("; ") { "${it.key}=${it.value}" }
     }
 
+    // ---------- PREFERITI (mi piace / salva in libreria → favorites del sito) ----------
+
+    /** Carica i preferiti dal sito una volta sola per sessione, per lo stato di cuori e salvataggi. */
+    private suspend fun ensureFavorites() {
+        val c = cookie ?: return
+        synchronized(favoriteSlugs) { if (favoritesLoaded) return }
+        refreshFavorites(c)
+    }
+
+    /** Sincronizza il set locale dei preferiti con /cp/favorites. */
+    private suspend fun refreshFavorites(c: String) {
+        val html = runCatching { khinsiderGet("$KHI/cp/favorites", c) }.getOrDefault("")
+        val loggedOut = html.contains("need to be registered and logged in") ||
+            html.contains("/forums/login") || html.contains(">Log In")
+        val slugs = if (loggedOut) emptySet()
+        else albumLinkRegex.findAll(html)
+            .map { "/game-soundtracks/album/${it.groupValues[1].trim()}" }
+            .toSet()
+        synchronized(favoriteSlugs) {
+            favoriteSlugs.clear()
+            favoriteSlugs.addAll(slugs)
+            favoritesLoaded = true
+        }
+    }
+
+    /**
+     * L'endpoint di toggle usa l'albumid NUMERICO (es. 55185), che non è nei dati
+     * del mirror API: lo estraiamo dalla pagina album del sito (con cache LRU).
+     */
+    private suspend fun albumIdOf(albumId: String, c: String): String {
+        synchronized(albumIdCache) { albumIdCache[albumId]?.let { return it } }
+        val html = runCatching { khinsiderGet("$KHI$albumId", c) }.getOrDefault("")
+        if (html.contains(">Log In") || html.contains("/forums/login")) throw ClientException.LoginRequired()
+        val id = Regex("""album_favorite_toggle\?albumid=(\d+)""").find(html)?.groupValues?.get(1)
+            ?: Regex("""data-albumid="?(\d+)""").find(html)?.groupValues?.get(1)
+            ?: throw Exception("albumid non trovato per $albumId: il sito potrebbe aver cambiato struttura")
+        synchronized(albumIdCache) { albumIdCache[albumId] = id }
+        return id
+    }
+
+    private suspend fun isFavorite(item: EchoMediaItem): Boolean {
+        if (item !is Album) return false
+        if (cookie == null) return false
+        ensureFavorites()
+        return synchronized(favoriteSlugs) { favoriteSlugs.contains(item.id) }
+    }
+
+    /** Toggle sul sito SOLO se lo stato locale differisce da quello richiesto (evita doppi toggle). */
+    private suspend fun setFavorite(item: EchoMediaItem, should: Boolean) {
+        if (item !is Album) throw Exception("Solo gli album possono essere aggiunti ai preferiti")
+        val c = cookie ?: throw ClientException.LoginRequired()
+        ensureFavorites()
+        val already = synchronized(favoriteSlugs) { favoriteSlugs.contains(item.id) == should }
+        if (already) return
+        val albumId = albumIdOf(item.id, c)
+        val request = Request.Builder()
+            .url("$KHI/cp/album_favorite_toggle?albumid=$albumId")
+            .header("User-Agent", UA)
+            .header("Cookie", c)
+            .build()
+        val response = client.newCall(request).await()
+        val code = response.code
+        val body = response.body?.string() ?: ""
+        response.close()
+        if (code !in 200..399) throw Exception("Impossibile aggiornare i preferiti (HTTP $code)")
+        if (body.contains(">Log In") || body.contains("/forums/login")) throw ClientException.LoginRequired()
+        synchronized(favoriteSlugs) {
+            if (should) favoriteSlugs.add(item.id) else favoriteSlugs.remove(item.id)
+        }
+    }
+
+    override suspend fun likeItem(item: EchoMediaItem, shouldLike: Boolean) = setFavorite(item, shouldLike)
+
+    override suspend fun isItemLiked(item: EchoMediaItem): Boolean = isFavorite(item)
+
+    override suspend fun saveToLibrary(item: EchoMediaItem, shouldSave: Boolean) = setFavorite(item, shouldSave)
+
+    override suspend fun isItemSaved(item: EchoMediaItem): Boolean = isFavorite(item)
+
+    // ---------- CRONOLOGIA (locale + sito integrate) ----------
+
+    /** Registra l'apertura di un album nella cronologia locale (in memoria, volatile). */
+    private fun recordHistory(album: Album) {
+        synchronized(localHistory) {
+            localHistory.remove(album.id)
+            localHistory[album.id] = System.currentTimeMillis() to album
+            while (localHistory.size > historyMax) {
+                val oldest = localHistory.entries.minByOrNull { it.value.first } ?: break
+                localHistory.remove(oldest.key)
+            }
+        }
+    }
+
+    private fun relativeTime(ts: Long): String {
+        val minutes = (System.currentTimeMillis() - ts) / 60_000
+        return when {
+            minutes < 1 -> "adesso"
+            minutes < 60 -> "$minutes min fa"
+            minutes < 60 * 24 -> "${minutes / 60} ore fa"
+            minutes < 60 * 24 * 7 -> "${minutes / (60 * 24)} giorni fa"
+            else -> "${minutes / (60 * 24 * 7)} sett. fa"
+        }
+    }
+
+    /**
+     * Cronologia integrata: prima gli album aperti nell'app (con tempo relativo),
+     * poi quelli registrati dal sito non ancora presenti, senza duplicati.
+     * Funziona anche senza login (mostra solo la parte locale).
+     */
+    private suspend fun historyShelf(): Shelf? {
+        val local: List<Album> = synchronized(localHistory) {
+            localHistory.values.sortedByDescending { it.first }.map { (ts, a) ->
+                a.copy(subtitle = relativeTime(ts), isLikeable = true)
+            }
+        }
+        val merged = LinkedHashMap<String, Album>()
+        local.forEach { merged[it.id] = it }
+        val c = cookie
+        if (c != null) {
+            val site = runCatching { scrapeAlbumList("$KHI/cp/history", 30, c) }.getOrDefault(emptyList())
+            site.forEach { merged.putIfAbsent(it.id, it) }
+        }
+        if (merged.isEmpty()) return null
+        return Shelf.Lists.Items(id = "lib_history", title = "Cronologia", list = merged.values.toList())
+    }
+
     // ---------- LIBRERIA ----------
 
     override suspend fun loadLibraryFeed(): Feed<Shelf> {
-        if (cookie == null) return emptyList<Shelf>().toFeed()
+        val shelves = mutableListOf<Shelf>()
+        val c = cookie
+        if (c != null) {
+            // I preferiti vengono scaricati una volta sola e riusati sia per la
+            // sezione sia per lo stato di cuore/salvataggio (niente doppia richiesta).
+            val favs = runCatching { scrapeAlbumList("$KHI/cp/favorites", 30, c) }.getOrDefault(emptyList())
+            synchronized(favoriteSlugs) {
+                favoriteSlugs.clear()
+                favoriteSlugs.addAll(favs.map { it.id })
+                favoritesLoaded = true
+            }
+            if (favs.isNotEmpty()) {
+                shelves += Shelf.Lists.Items(id = "lib_favs", title = "I Miei Preferiti", list = favs)
+            }
+        }
+        // Cronologia: locale + sito in un'unica sezione, visibile anche senza login.
+        historyShelf()?.let { shelves += it }
+        if (c != null) {
+            albumsShelf("lib_uploads", "I Miei Album", "/cp/uploads", 30, c)?.let { shelves += it }
+        }
         return Feed(emptyList()) {
-            PagedData.Single {
-                listOfNotNull(
-                    albumsShelf("lib_favs", "I Miei Preferiti", "/cp/favorites", 30, cookie),
-                    albumsShelf("lib_history", "La Mia Cronologia", "/cp/history", 30, cookie),
-                    albumsShelf("lib_uploads", "I Miei Album", "/cp/uploads", 30, cookie),
-                )
-            }.toFeedData()
+            PagedData.Single { shelves }.toFeedData()
         }
     }
 
@@ -788,8 +947,10 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
         return json
     }
 
-    override suspend fun loadAlbum(album: Album): Album =
-        albumMeta(album.id).toAlbumDetails(album)
+    override suspend fun loadAlbum(album: Album): Album {
+        recordHistory(album)   // apertura album → cronologia locale
+        return albumMeta(album.id).toAlbumDetails(album)
+    }
 
     override suspend fun loadTracks(album: Album): Feed<Track>? =
         albumMeta(album.id).toTracks(album).toFeed()
@@ -843,7 +1004,7 @@ object FuzzyIndex {
         }
         return scored.sortedByDescending { it.first }
             .take(limit)
-            .map { (_, e) -> Album(e.id, e.title) }
+            .map { (_, e) -> Album(e.id, e.title, isLikeable = true) }
     }
 
     private fun normalize(s: String): String {
