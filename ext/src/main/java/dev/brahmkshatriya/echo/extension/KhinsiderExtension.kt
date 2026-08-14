@@ -63,6 +63,7 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
 
     // ---------- Preferiti (sito) ----------
     private val favoriteSlugs = mutableSetOf<String>()          // id album (slug) attualmente nei preferiti
+    private val slugToAlbumId = mutableMapOf<String, String>()  // slug -> albumid numerico (dai preferiti del sito)
     private var favoritesLoaded = false                          // set già sincronizzato con /cp/favorites?
     private val albumIdCache = object : LinkedHashMap<String, String>(16, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?): Boolean = size > 20
@@ -292,7 +293,7 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
         }
     }
 
-    // ---------- LE SEZIONI DEL SITO (nuovo) ----------
+    // ---------- LE SEZIONI DEL SITO ----------
 
     private val KHI = "https://downloads.khinsider.com"
 
@@ -408,13 +409,8 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
         }
     }
 
-    private suspend fun scrapeAlbumList(
-        url: String,
-        limit: Int = 30,
-        cookie: String? = null,
-        skipFirst: Int = 0,
-    ): List<Album> {
-        val html = runCatching { khinsiderGet(url, cookie) }.getOrDefault("")
+    /** Estrae gli album da HTML già scaricato (niente richieste extra). */
+    private fun parseAlbumList(html: String, limit: Int = 30, skipFirst: Int = 0): List<Album> {
         val albums = LinkedHashMap<String, Album>()   // niente duplicati
         for (match in albumLinkRegex.findAll(html)) {
             val slug = match.groupValues[1].trim()
@@ -438,9 +434,18 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
             if (albums.size >= skipFirst + limit) break
         }
         val list = albums.values.toList()
-        val result = if (skipFirst > 0) list.drop(skipFirst) else list
+        return if (skipFirst > 0) list.drop(skipFirst) else list
+    }
+
+    private suspend fun scrapeAlbumList(
+        url: String,
+        limit: Int = 30,
+        cookie: String? = null,
+        skipFirst: Int = 0,
+    ): List<Album> {
+        val html = runCatching { khinsiderGet(url, cookie) }.getOrDefault("")
         // Le pagine "Top 100..." non hanno immagini: le prendiamo dal mirror API.
-        return enrichWithCovers(result)
+        return enrichWithCovers(parseAlbumList(html, limit, skipFirst))
     }
 
     /** Paginazione di Echo 1.0: Continuous carica le pagine una dopo l'altra */
@@ -751,35 +756,80 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
         refreshFavorites(c)
     }
 
-    /** Sincronizza il set locale dei preferiti con /cp/favorites. */
-    private suspend fun refreshFavorites(c: String) {
+    /**
+     * Sincronizza lo stato locale con /cp/favorites. Nella pagina ogni album ha
+     * l'icona di rimozione con l'albumid numerico come attributo:
+     *   <i class="material-icons albumDelete" albumid="70421">delete_forever</i>
+     * quindi qui costruiamo anche la mappa slug -> albumid, così rimuovere un
+     * preferito non richiede di scaricare la pagina album.
+     * Restituisce gli album della pagina per riusarli nella sezione Libreria.
+     */
+    private suspend fun refreshFavorites(c: String): List<Album> {
         val html = runCatching { khinsiderGet("$KHI/cp/favorites", c) }.getOrDefault("")
         val loggedOut = html.contains("need to be registered and logged in") ||
             html.contains("/forums/login") || html.contains(">Log In")
-        val slugs = if (loggedOut) emptySet()
-        else albumLinkRegex.findAll(html)
-            .map { "/game-soundtracks/album/${it.groupValues[1].trim()}" }
-            .toSet()
+        val favs = if (loggedOut) emptyList() else parseAlbumList(html, 30)
+
+        // Posizione di ogni album e di ogni albumid="NNN" nella pagina: a ogni
+        // album assegniamo l'albumid più vicino (di solito quello della sua riga).
+        val albumPos = albumLinkRegex.findAll(html)
+            .map { it.range.first to "/game-soundtracks/album/${it.groupValues[1].trim()}" }
+            .toList()
+        val idPos = Regex("""albumid\s*=\s*["'](\d+)""", RegexOption.IGNORE_CASE).findAll(html)
+            .map { it.range.first to it.groupValues[1] }
+            .toList()
+
         synchronized(favoriteSlugs) {
             favoriteSlugs.clear()
-            favoriteSlugs.addAll(slugs)
+            favoriteSlugs.addAll(favs.map { it.id })
+            slugToAlbumId.clear()
+            for ((pos, slugPath) in albumPos) {
+                idPos.minByOrNull { (it.first - pos).absoluteValue }?.second?.let {
+                    slugToAlbumId[slugPath] = it
+                }
+            }
             favoritesLoaded = true
         }
+        return favs
     }
 
     /**
-     * L'endpoint di toggle usa l'albumid NUMERICO (es. 55185), che non è nei dati
-     * del mirror API: lo estraiamo dalla pagina album del sito (con cache LRU).
+     * L'endpoint di toggle usa l'albumid NUMERICO (es. 70421), che non è nei dati
+     * del mirror API: lo cerchiamo prima nella mappa ricavata da /cp/favorites,
+     * poi nella pagina album del sito (con più pattern e cache LRU).
      */
     private suspend fun albumIdOf(albumId: String, c: String): String {
         synchronized(albumIdCache) { albumIdCache[albumId]?.let { return it } }
+        synchronized(slugToAlbumId) { slugToAlbumId[albumId]?.let { return it } }
+
         val html = runCatching { khinsiderGet("$KHI$albumId", c) }.getOrDefault("")
         if (html.contains(">Log In") || html.contains("/forums/login")) throw ClientException.LoginRequired()
-        val id = Regex("""album_favorite_toggle\?albumid=(\d+)""").find(html)?.groupValues?.get(1)
-            ?: Regex("""data-albumid="?(\d+)""").find(html)?.groupValues?.get(1)
+        val id = findAlbumIdInPage(html)
             ?: throw Exception("albumid non trovato per $albumId: il sito potrebbe aver cambiato struttura")
         synchronized(albumIdCache) { albumIdCache[albumId] = id }
         return id
+    }
+
+    /**
+     * Cerca l'albumid numerico nella pagina album. La stellina è solo
+     * <i class="material-icons">favorite_border</i>: l'id deve essere in un
+     * elemento vicino (attributo), in una variabile JS o in una chiamata JS.
+     */
+    private fun findAlbumIdInPage(html: String): String? {
+        // 1) Link/URL letterale del toggle (se il bottone è un <a href=...>)
+        Regex("""album_favorite_toggle\?albumid=(\d+)""").find(html)?.let { return it.groupValues[1] }
+        // 2) Attributo albumid="NNN" (lo stile usato dal sito, es. sulle icone)
+        Regex("""albumid\s*=\s*["'](\d+)""", RegexOption.IGNORE_CASE).find(html)?.let { return it.groupValues[1] }
+        // 3) Attributo data-album-id / data-albumid
+        Regex("""data-album-?id\s*=\s*["']?(\d+)""", RegexOption.IGNORE_CASE).find(html)?.let { return it.groupValues[1] }
+        // 4) Input nascosto di un form
+        Regex("""name=["']albumid["'][^>]*?value=["'](\d+)""", RegexOption.IGNORE_CASE).find(html)?.let { return it.groupValues[1] }
+        Regex("""value=["'](\d+)["'][^>]*?name=["']albumid["']""", RegexOption.IGNORE_CASE).find(html)?.let { return it.groupValues[1] }
+        // 5) Variabile JS tipo: var album_id = 70421;
+        Regex("""(?:album_?id|ALBUM_ID)\s*[:=]\s*["']?(\d{4,7})""").find(html)?.let { return it.groupValues[1] }
+        // 6) Chiamata JS tipo: toggleFavorite(70421) / setFav(70421)
+        Regex("""(?:favorite|fav)\w*\s*\(\s*["']?(\d{4,7})""", RegexOption.IGNORE_CASE).find(html)?.let { return it.groupValues[1] }
+        return null
     }
 
     private suspend fun isFavorite(item: EchoMediaItem): Boolean {
@@ -809,7 +859,12 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
         if (code !in 200..399) throw Exception("Impossibile aggiornare i preferiti (HTTP $code)")
         if (body.contains(">Log In") || body.contains("/forums/login")) throw ClientException.LoginRequired()
         synchronized(favoriteSlugs) {
-            if (should) favoriteSlugs.add(item.id) else favoriteSlugs.remove(item.id)
+            if (should) {
+                favoriteSlugs.add(item.id)
+                slugToAlbumId[item.id] = albumId   // per i prossimi "rimuovi" senza rifetch
+            } else {
+                favoriteSlugs.remove(item.id)
+            }
         }
     }
 
@@ -876,14 +931,10 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
         if (c != null) {
             // I preferiti vengono scaricati una volta sola e riusati sia per la
             // sezione sia per lo stato di cuore/salvataggio (niente doppia richiesta).
-            val favs = runCatching { scrapeAlbumList("$KHI/cp/favorites", 30, c) }.getOrDefault(emptyList())
-            synchronized(favoriteSlugs) {
-                favoriteSlugs.clear()
-                favoriteSlugs.addAll(favs.map { it.id })
-                favoritesLoaded = true
-            }
-            if (favs.isNotEmpty()) {
-                shelves += Shelf.Lists.Items(id = "lib_favs", title = "I Miei Preferiti", list = favs)
+            val favs = runCatching { refreshFavorites(c) }.getOrDefault(emptyList())
+            val favsWithCovers = enrichWithCovers(favs)
+            if (favsWithCovers.isNotEmpty()) {
+                shelves += Shelf.Lists.Items(id = "lib_favs", title = "I Miei Preferiti", list = favsWithCovers)
             }
         }
         // Cronologia: locale + sito in un'unica sezione, visibile anche senza login.
