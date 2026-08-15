@@ -56,11 +56,23 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.net.URLDecoder
 import java.net.URLEncoder
+import java.util.concurrent.TimeUnit
 
 class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, AlbumClient, TrackClient, LibraryFeedClient, LoginClient.CustomInput, LikeClient, SaveClient, ShareClient, PlaylistClient, PlaylistEditClient, PlaylistEditPrivacyClient {
 
-    private val client = OkHttpClient()
-    private val noRedirectClient = OkHttpClient.Builder().followRedirects(false).build()
+    // Timeout generosi: le pagine di browse arrivano a 300KB+ (es. Android, 327KB)
+    // e con i timeout di default OkHttp (10s) scattava il timeout -> "vuoto" sistematico.
+    private val client = OkHttpClient.Builder()
+        .connectTimeout(30, TimeUnit.SECONDS)
+        .readTimeout(60, TimeUnit.SECONDS)
+        .writeTimeout(30, TimeUnit.SECONDS)
+        .build()
+    private val noRedirectClient = OkHttpClient.Builder()
+        .followRedirects(false)
+        .connectTimeout(30, TimeUnit.SECONDS)
+        .readTimeout(60, TimeUnit.SECONDS)
+        .writeTimeout(30, TimeUnit.SECONDS)
+        .build()
     private var setting: Settings? = null
     private val audioCache = mutableMapOf<String, String>()
     private val coverCache = mutableMapOf<String, String>()          // albumId -> URL originale (taglia applicata all'uso)
@@ -525,12 +537,24 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
     private val albumLinkRegex =
         Regex("""<a href="/game-soundtracks/album/([^"/]+)/?"[^>]*>(.*?)</a>""", RegexOption.DOT_MATCHES_ALL)
 
+    /** Numero totale di pagine dal footer della pagina ("Page 1 of N" o max dei link ?page=). */
+    private fun footerMaxPage(html: String): Int? =
+        Regex("""Page\s+\d+\s+of\s+(\d+)""", RegexOption.IGNORE_CASE).find(html)?.groupValues?.get(1)?.toIntOrNull()
+            ?: Regex("""\?page=(\d+)""").findAll(html).mapNotNull { it.groupValues[1].toIntOrNull() }.maxOrNull()
+
+    /**
+     * GET del sito. LANCIA su errore (HTTP non-2xx, timeout, rete): così chi chiama
+     * può distinguere "richiesta fallita" da "nessun risultato" (vuoto reale).
+     */
     private suspend fun khinsiderGet(url: String, cookie: String? = null): String {
         val builder = Request.Builder().url(url)
             .header("User-Agent", "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/120.0 Mobile Safari/537.36")
         if (cookie != null) builder.header("Cookie", cookie)
         val response = client.newCall(builder.build()).await()
-        if (!response.isSuccessful) throw Exception("HTTP ${response.code}")
+        if (!response.isSuccessful) {
+            println("khinsider-http: ${response.code} per $url")
+            throw Exception("HTTP ${response.code} per $url")
+        }
         return response.body?.string() ?: ""
     }
 
@@ -620,15 +644,24 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
         return if (skipFirst > 0) list.drop(skipFirst) else list
     }
 
+    /**
+     * Scarica e parsifica una lista di album. LANCIA su errore di rete/HTTP (distinto
+     * dal "vuoto vero": se il server risponde ma non ci sono album, ritorna lista vuota
+     * e scrive un log di debug).
+     */
     private suspend fun scrapeAlbumList(
         url: String,
         limit: Int = 30,
         cookie: String? = null,
         skipFirst: Int = 0,
     ): List<Album> {
-        val html = runCatching { khinsiderGet(url, cookie) }.getOrDefault("")
-        // Le pagine "Top 100..." non hanno immagini: le prendiamo dal mirror API.
-        return enrichWithCovers(parseAlbumList(html, limit, skipFirst))
+        val html = khinsiderGet(url, cookie)
+        if (html.isBlank()) throw Exception("Risposta vuota per $url")
+        val parsed = parseAlbumList(html, limit, skipFirst)
+        if (parsed.isEmpty()) {
+            println("khinsider-scrape: 0 album da $url (${html.length} bytes)")
+        }
+        return enrichWithCovers(parsed)
     }
 
     private suspend fun albumsShelf(
@@ -644,7 +677,7 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
         )
     }
 
-    // ---------- CATEGORIE (Console / Tipo) — griglia di bottoni come richiesto ----------
+    // ---------- CATEGORIE (Console / Tipo) — griglia di bottoni ----------
 
     /**
      * Griglia compatta di voci testuali (Shelf.Lists.Categories). Ogni voce è una
@@ -666,25 +699,44 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
         )
 
     /**
-     * Album di una pagina piattaforma/tipo: il layout più semplice (Shelf.Lists.Items).
-     * La "Top 12" del sito compare in cima a OGNI pagina (verificato su pagina 2+):
-     * vengono quindi saltati sempre i primi 12 link. Le pagine successive si caricano
-     * con ?page=N scorrendo fino in fondo.
+     * Album di una pagina piattaforma/tipo, UN BLOCCO per pagina del sito,
+     * etichettato "Pagina N", con TUTTI gli album reali di quella pagina
+     * (il sito ne mostra ~460 per pagina; prima ne caricavamo solo 30 → troncamento).
+     * La "Top 12" del sito compare in cima a OGNI pagina: viene sempre saltata.
+     * Le pagine successive si caricano scorrendo fino in fondo (on-demand:
+     * per Windows = 96 pagine, caricare tutto subito non è sensato).
+     * Errori di rete/HTTP si propagano → Echo mostra "Errore di caricamento".
      */
-    private fun platformPaged(path: String): PagedData<Shelf> = PagedData.Continuous { key ->
-        val sitePage = key?.toIntOrNull() ?: 1
-        val url = if (sitePage == 1) "$KHI$path" else "$KHI$path?page=$sitePage"
-        val items = scrapeAlbumList(url, 30, null, 12)
-        val shelves: List<Shelf> = if (items.isEmpty()) emptyList()
-        else listOf(
-            Shelf.Lists.Items(
-                id = "pf-${path.substringAfterLast('/')}-p$sitePage",
-                title = "",
-                list = items,
+    private fun platformPaged(path: String): PagedData<Shelf> {
+        var maxPage = 1
+        var firstPage = true
+        var prevFirst: String? = null
+        return PagedData.Continuous { key ->
+            val sitePage = key?.toIntOrNull() ?: 1
+            val url = if (sitePage == 1) "$KHI$path" else "$KHI$path?page=$sitePage"
+            val html = khinsiderGet(url)
+            if (firstPage) {
+                firstPage = false
+                maxPage = footerMaxPage(html) ?: 1
+            }
+            val items = enrichWithCovers(parseAlbumList(html, 600, 12))
+            val first = items.firstOrNull()?.id
+            val shelves: List<Shelf> = if (items.isEmpty()) emptyList()
+            else listOf(
+                Shelf.Lists.Items(
+                    id = "pf-${path.substringAfterLast('/')}-p$sitePage",
+                    title = "${t("page")} $sitePage",
+                    list = items,
+                )
             )
-        )
-        val next = if (items.size >= 30) (sitePage + 1).toString() else null
-        Page(shelves, next)
+            val next = when {
+                first == null || first == prevFirst -> null          // pagina vuota o ripetuta
+                sitePage < maxPage -> { prevFirst = first; (sitePage + 1).toString() }
+                else -> null
+            }
+            if (first != null) prevFirst = first
+            Page(shelves, next)
+        }
     }
 
     /** Feed di una sezione con lente di ricerca nativa in alto a destra (filtra gli album caricati). */
@@ -705,28 +757,34 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
     }
 
     /**
-     * "Vedi tutto" di una lista: continua dalla fine dell'anteprima, 100 album per
-     * pagina del sito (?page=N). Ferma la paginazione su pagina vuota o ripetuta.
+     * "Vedi tutto" di una lista: continua dalla fine dell'anteprima con TUTTI gli
+     * album di ogni pagina del sito, etichettati "Pagina N". Ferma su pagina vuota/ripetuta.
      */
     private fun listMorePaged(path: String, preview: Int): PagedData<Shelf> {
+        var maxPage = 1
+        var firstPage = true
         var prevFirst: String? = null
         return PagedData.Continuous { key ->
             val sitePage = key?.toIntOrNull() ?: 1
-            val skip = if (sitePage == 1) preview else 0
             val url = if (sitePage == 1) "$KHI$path" else "$KHI$path?page=$sitePage"
-            val items = scrapeAlbumList(url, 100, null, skip)
+            val html = khinsiderGet(url)
+            if (firstPage) {
+                firstPage = false
+                maxPage = footerMaxPage(html) ?: 1
+            }
+            val items = enrichWithCovers(parseAlbumList(html, 600, if (sitePage == 1) preview else 0))
             val first = items.firstOrNull()?.id
             val shelves: List<Shelf> = if (items.isEmpty()) emptyList()
             else listOf(
                 Shelf.Lists.Items(
                     id = "top-${path.substringAfterLast('/')}-p$sitePage",
-                    title = t("page"),
+                    title = "${t("page")} $sitePage",
                     list = items,
                 )
             )
             val next = when {
                 first == null || first == prevFirst -> null          // pagina vuota o ripetuta
-                items.size + skip >= 100 -> { prevFirst = first; (sitePage + 1).toString() }
+                sitePage < maxPage -> { prevFirst = first; (sitePage + 1).toString() }
                 else -> null
             }
             if (first != null) prevFirst = first
@@ -864,16 +922,18 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
         val (loggedIn, mainHtml) = checkMainSession(session2)
         if (!loggedIn) throw Exception("Login non riuscito: impossibile verificare la sessione.")
 
-        // Nome utente reale (se estraibile), altrimenti "Login effettuato"
+        // Nome utente reale (se estraibile con certezza), altrimenti etichetta generica.
         val accountHtml = runCatching {
             getPageWithCookie("$KHI/forums/index.php?account/", session2)
         }.getOrDefault("")
-        val name = parseUsername(mainHtml, accountHtml) ?: t("login_ok")
+        val name = parseUsername(mainHtml, accountHtml)
+        println("khinsider-login: nome rilevato = ${name ?: "NONE (fallback)"}")
+        val displayName = name ?: t("login_ok")
 
         return listOf(
             User(
                 id = "khinsider",
-                name = name,
+                name = displayName,
                 subtitle = "Account khinsider",
                 extras = mapOf("cookie" to session2),
             )
@@ -924,32 +984,49 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
         return body
     }
 
-    /** Cerca il nome utente vero nell'HTML della pagina account XenForo o del sito principale. */
+    /**
+     * Cerca il nome utente reale. SOLO pattern specifici e verificati: il link profilo
+     * XenForo /members/{nome}.{id}/ e gli elementi con class="username". NIENTE regex
+     * generiche su "menu-header" (avevano agganciato "Direct Messages" — un elemento
+     * di navigazione, non lo username).
+     */
     private fun parseUsername(mainHtml: String, accountHtml: String): String? {
-        Regex("""class="username">([^<]+)</span>""").find(accountHtml)?.let {
-            val n = it.groupValues[1].trim()
-            if (n.isNotBlank()) return n
+        val memberRe = Regex("""href="[^"]*/members/([^"/.]+)\.\d+/"""", RegexOption.IGNORE_CASE)
+        for (html in listOf(accountHtml, mainHtml)) {
+            memberRe.find(html)?.let {
+                val n = it.groupValues[1].trim()
+                if (n.isNotBlank()) {
+                    println("khinsider-login: username da members link: $n")
+                    return n
+                }
+            }
         }
-        Regex("""class="menu-header-main">([^<]+)</span>""").find(accountHtml)?.let {
-            val n = it.groupValues[1].trim()
-            if (n.isNotBlank()) return n
+        val usernameRe = Regex("""class="username">([^<]+)</span>""")
+        for (html in listOf(accountHtml, mainHtml)) {
+            usernameRe.find(html)?.let {
+                val n = it.groupValues[1].trim()
+                if (n.isNotBlank()) {
+                    println("khinsider-login: username da class=username: $n")
+                    return n
+                }
+            }
         }
-        Regex("""menu-header[^>]*>\s*([^<]+)""").find(accountHtml)?.let {
-            val n = it.groupValues[1].trim()
-            if (n.isNotBlank()) return n
-        }
-        // Link XenForo ai profili: /members/{nome}.{id}/ (formato confermato sul sito)
-        Regex("""href="[^"]*/members/([^"/.]+)\.\d+/"""", RegexOption.IGNORE_CASE).find(mainHtml)?.let {
-            val n = it.groupValues[1].trim()
-            if (n.isNotBlank()) return n
-        }
-        Regex("""href="[^"]*/user(?:s)?/([^"/?]+)"""", RegexOption.IGNORE_CASE).find(mainHtml)?.let {
-            val n = it.groupValues[1].trim()
-            if (n.isNotBlank()) return n
+        val headerRe = Regex("""class="menu-header-main">([^<]+)</span>""")
+        for (html in listOf(accountHtml, mainHtml)) {
+            headerRe.find(html)?.let {
+                val n = it.groupValues[1].trim()
+                if (n.isNotBlank()) {
+                    println("khinsider-login: username da menu-header-main: $n")
+                    return n
+                }
+            }
         }
         Regex("""Welcome(?:\s+back)?,\s*([^<!"']+)""", RegexOption.IGNORE_CASE).find(mainHtml)?.let {
             val n = it.groupValues[1].trim()
-            if (n.isNotBlank()) return n
+            if (n.isNotBlank()) {
+                println("khinsider-login: username da Welcome: $n")
+                return n
+            }
         }
         return null
     }
@@ -1043,12 +1120,7 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
             }
             if (first) {
                 first = false
-                maxPage = Regex("""Page\s+\d+\s+of\s+(\d+)""", RegexOption.IGNORE_CASE)
-                    .find(html)?.groupValues?.get(1)?.toIntOrNull()
-                    ?: Regex("""\?page=(\d+)""").findAll(html)
-                        .mapNotNull { it.groupValues[1].toIntOrNull() }.maxOrNull()
-                    ?: 1
-                maxPage = maxPage.coerceIn(1, 25)   // cap di sicurezza anti-loop
+                maxPage = footerMaxPage(html) ?: 1
             }
             val (favs, ids) = parseFavoritesPage(html)
             favs.forEach { allAlbums.putIfAbsent(it.id, it) }
