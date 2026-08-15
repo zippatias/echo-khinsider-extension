@@ -271,6 +271,23 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
         return code
     }
 
+    /**
+     * GET con header AJAX (X-Requested-With: XMLHttpRequest): il sito risponde JSON
+     * ("1" = successo) SOLO alle richieste che hanno questo header, come quelle che
+     * fa jQuery ($.get) nella pagina. Restituisce (status, corpo).
+     */
+    private suspend fun ajaxGetStatus(url: String, cookie: String?): Pair<Int, String> {
+        val builder = Request.Builder().url(url)
+            .header("User-Agent", UA)
+            .header("X-Requested-With", "XMLHttpRequest")
+        if (cookie != null) builder.header("Cookie", cookie)
+        val response = client.newCall(builder.build()).await()
+        val code = response.code
+        val body = response.body?.string() ?: ""
+        response.close()
+        return code to body
+    }
+
     /** Retry con backoff: 3 tentativi, attesa 500ms/1s tra i tentativi. */
     private suspend fun <T> withRetry(attempts: Int = 3, block: suspend () -> T): T {
         var last: Exception? = null
@@ -1406,15 +1423,10 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
     /**
      * Aggiunge tracce a una playlist. Endpoint dedotto dal naming del sito
      * (song_delete, song_order_update): /playlist/song_add?playlistid=X&songid=Y.
-     * Se il sito lo chiamasse diversamente, dimmelo (o cattura la richiesta da
-     * DevTools) e cambio il nome dell'endpoint.
-     */
-    /**
-     * Aggiunge tracce a una playlist. Endpoint dedotto dal naming del sito
-     * (song_delete, song_order_update): /playlist/song_add?playlistid=X&songid=Y.
      * Il successo è confermato dal corpo della risposta (il JS del sito controlla
      * che il JSON sia "1"); ogni fallimento lancia con URL e corpo della risposta
-     * per una diagnosi immediata.
+     * per una diagnosi immediata. La richiesta è AJAX (X-Requested-With): senza
+     * quell'header il sito risponde con la pagina HTML invece del JSON "1".
      */
     override suspend fun addTracksToPlaylist(
         playlist: Playlist, tracks: List<Track>, index: Int, new: List<Track>,
@@ -1424,14 +1436,7 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
         for (track in new) {
             val sid = songIdOf(track, c)
             val url = "$KHI/playlist/song_add?playlistid=$pid&songid=$sid"
-            val request = Request.Builder().url(url)
-                .header("User-Agent", UA)
-                .header("Cookie", c)
-                .build()
-            val response = client.newCall(request).await()
-            val code = response.code
-            val body = response.body?.string() ?: ""
-            response.close()
+            val (code, body) = ajaxGetStatus(url, c)
             println("khinsider-playlist: add -> HTTP $code, body=${body.trim().take(150)}")
             if (code !in 200..399 || body.trim() != "1") {
                 throw Exception(
@@ -1442,7 +1447,6 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
         }
         synchronized(cachedPlaylists) { playlistsLoaded = false }
     }
-
 
     override suspend fun removeTracksFromPlaylist(
         playlist: Playlist, tracks: List<Track>, indexes: List<Int>,
@@ -1469,8 +1473,11 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
         val sid = track.extras["songid"]
             ?: throw Exception("songid mancante per la traccia '${track.title}' (riapri la playlist)")
         // Lo script del sito invia order = posizione della riga (1-based, con header).
-        val code = httpGetStatus("$KHI/playlist/song_order_update?order=${toIndex + 1}&songid=$sid&playlistid=$pid", c)
-        if (code !in 200..399) throw Exception("Riordino traccia fallito (HTTP $code)")
+        // Anche questo endpoint è AJAX: va chiamato con X-Requested-With.
+        val url = "$KHI/playlist/song_order_update?order=${toIndex + 1}&songid=$sid&playlistid=$pid"
+        val (code, body) = ajaxGetStatus(url, c)
+        println("khinsider-playlist: move -> HTTP $code, body=${body.trim().take(150)}")
+        if (code !in 200..399) throw Exception("Riordino traccia fallito (HTTP $code): $url")
         synchronized(cachedPlaylists) { playlistsLoaded = false }
     }
 
