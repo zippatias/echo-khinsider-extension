@@ -80,7 +80,7 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
     // ---------- Playlist (sito, PRO) ----------
     private val cachedPlaylists = mutableListOf<Playlist>()
     private var playlistsLoaded = false
-    private val songIdCache = mutableMapOf<String, String>()    // href traccia (decodificato) -> songid numerico
+    private val songIdCache = mutableMapOf<String, String>()    // path traccia normalizzato -> songid numerico
 
     // ---------- Cronologia locale (volatile, in memoria) ----------
     private val localHistory = LinkedHashMap<String, Pair<Long, Album>>()   // id -> (timestamp, album)
@@ -136,7 +136,7 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
             "top6m" to "Top 100 Ultimi 6 Mesi", "topnew" to "Top 100 Nuovi",
             "viewed" to "Attualmente Visti", "favs" to "Più Preferiti",
             "my_favs" to "I Miei Preferiti", "history" to "Cronologia", "my_uploads" to "I Miei Album",
-            "playlists" to "Le Mie Playlist", "tracks" to "tracce",
+            "playlists" to "Le Mie Playlist", "tracks" to "tracce", "login_ok" to "Login effettuato",
             "album" to "Album", "page" to "Pagina", "latest_search" to "Ultimi arrivi",
             "year" to "Anno",
             "lang_label" to "Lingua interfaccia",
@@ -155,7 +155,7 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
             "top6m" to "Top 100 Last 6 Months", "topnew" to "Top 100 Newly Added",
             "viewed" to "Currently Viewed", "favs" to "Most Favorites",
             "my_favs" to "My Favorites", "history" to "History", "my_uploads" to "My Albums",
-            "playlists" to "My Playlists", "tracks" to "tracks",
+            "playlists" to "My Playlists", "tracks" to "tracks", "login_ok" to "Logged in",
             "album" to "Album", "page" to "Page", "latest_search" to "Latest additions",
             "year" to "Year",
             "lang_label" to "Interface language",
@@ -174,7 +174,7 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
             "top6m" to "過去6ヶ月トップ100", "topnew" to "新着トップ100",
             "viewed" to "現在視聴中", "favs" to "お気に入り上位",
             "my_favs" to "マイお気に入り", "history" to "履歴", "my_uploads" to "マイアルバム",
-            "playlists" to "マイプレイリスト", "tracks" to "曲",
+            "playlists" to "マイプレイリスト", "tracks" to "曲", "login_ok" to "ログイン済み",
             "album" to "アルバム", "page" to "ページ", "latest_search" to "最新の追加",
             "year" to "年",
             "lang_label" to "インターフェース言語",
@@ -277,6 +277,10 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
      * anche su URL singolarmente codificati (la seconda non cambia nulla).
      */
     private fun decodeAll(url: String): String = URLDecoder.decode(URLDecoder.decode(url, "UTF-8"), "UTF-8")
+
+    /** Path di una traccia normalizzato (senza scheme/host, decodificato): usato per i confronti. */
+    private fun trackPath(url: String): String? =
+        Regex("""/game-soundtracks/album/[^?#]+""").find(decodeAll(url))?.value
 
     /**
      * URL immagine via proxy del mirror, nella dimensione richiesta:
@@ -660,30 +664,52 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
         )
 
     /**
-     * Album di una pagina piattaforma/tipo: salta la "Top 12" del sito (primi 12
-     * link della pagina) e pagina le pagine successive con ?page=N.
-     * NOTA: tipo di ritorno esplicito PagedData<Shelf> (evita il problema di
-     * inferenza "CapturedType" che dava errore di compilazione).
+     * Riga verticale per un album: fake Track non riproducibile (apre l'album al tap),
+     * come fa asmr.one — è l'unico modo per avere la lista verticale 1-riga-per-album
+     * (thumbnail a sinistra, titolo a destra) invece delle card orizzontali.
+     */
+    private fun albumToRowShelf(album: Album): Shelf.Lists.Tracks =
+        Shelf.Lists.Tracks(
+            id = album.id,
+            title = "",
+            list = listOf(
+                Track(
+                    id = album.id,
+                    title = album.title,
+                    album = album,
+                    cover = album.cover,
+                    duration = 0,
+                    isPlayable = Track.Playable.No(reason = "Album Required"),
+                    isRadioSupported = false,
+                    isShareable = false,
+                    isLikeable = false,
+                    isSaveable = false,
+                    streamables = listOf(Streamable.server(id = "OPEN_ALBUM", quality = 1, title = null)),
+                )
+            ),
+        )
+
+    /**
+     * Album di una pagina piattaforma/tipo, come lista verticale di righe.
+     * La "Top 12" del sito compare in cima a OGNI pagina (verificato su pagina 2+):
+     * vengono quindi saltati sempre i primi 12 link della pagina.
+     * NOTA: tipo di ritorno esplicito PagedData<Shelf> (evita l'errore CapturedType).
      */
     private fun platformPaged(path: String): PagedData<Shelf> = PagedData.Continuous { key ->
         val sitePage = key?.toIntOrNull() ?: 1
-        val skip = if (sitePage == 1) 12 else 0
         val url = if (sitePage == 1) "$KHI$path" else "$KHI$path?page=$sitePage"
-        val items = scrapeAlbumList(url, 30, null, skip)
-        val shelves: List<Shelf> = if (items.isEmpty()) emptyList()
-        else listOf(
-            Shelf.Lists.Items(
-                id = "pf-${path.substringAfterLast('/')}-p$sitePage",
-                title = t("album"),
-                list = items,
-            )
-        )
-        val next = if (items.size + skip >= 30) (sitePage + 1).toString() else null
+        val items = scrapeAlbumList(url, 30, null, 12)
+        val shelves: List<Shelf> = items.map { albumToRowShelf(it) }
+        val next = if (items.size >= 30) (sitePage + 1).toString() else null
         Page(shelves, next)
     }
 
     private fun platformFeed(path: String): Feed<Shelf> =
-        Feed(emptyList()) { platformPaged(path).toFeedData() }
+        Feed(emptyList()) {
+            platformPaged(path).toFeedData(
+                buttons = Feed.Buttons(showSearch = true, showSort = false, showPlayAndShuffle = false)
+            )
+        }
 
     // ---------- TOP 100 / elenchi con "vedi tutto" ----------
 
@@ -814,7 +840,7 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
             val accountHtml = runCatching {
                 getPageWithCookie("https://downloads.khinsider.com/forums/index.php?account/", session)
             }.getOrDefault("")
-            val name = parseUsername(mainHtml, accountHtml) ?: "Khinsider"
+            val name = parseUsername(mainHtml, accountHtml) ?: t("login_ok")
 
             return listOf(
                 User(
@@ -880,6 +906,10 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
             if (n.isNotBlank()) return n
         }
         Regex("""class="menu-header-main">([^<]+)</span>""").find(accountHtml)?.let {
+            val n = it.groupValues[1].trim()
+            if (n.isNotBlank()) return n
+        }
+        Regex("""menu-header[^>]*>\s*([^<]+)""").find(accountHtml)?.let {
             val n = it.groupValues[1].trim()
             if (n.isNotBlank()) return n
         }
@@ -1333,29 +1363,40 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
         throw Exception("Privacy playlist: il sito non offre playlist pubbliche")
     }
 
-    /** songid numerico di una traccia, letto dalla pagina album (div playlistAddTo). */
+    /**
+     * songid numerico di una traccia, letto dalla pagina album (div playlistAddTo).
+     * Fallback: se l'URL non combacia (formato diverso mirror/sito, album mancante
+     * nel modello), prova per POSIZIONE usando albumOrderNumber.
+     */
     private suspend fun songIdOf(track: Track, c: String): String {
-        val key = decodeAll(track.id)
+        val key = trackPath(track.id)
+            ?: throw Exception("URL traccia non valido: ${track.id}")
         synchronized(songIdCache) { songIdCache[key]?.let { return it } }
-        val albumId = track.album?.id ?: throw Exception("album mancante per la traccia '${track.title}'")
+
+        // Album dalla traccia, o derivato dall'URL se il modello non lo porta.
+        val albumId = track.album?.id
+            ?: "/game-soundtracks/album/${key.removePrefix("/game-soundtracks/album/").substringBefore('/')}"
         val html = runCatching { khinsiderGet("$KHI$albumId", c) }.getOrDefault("")
-        val map = parseAlbumSongIds(html)
-        synchronized(songIdCache) { songIdCache.putAll(map) }
-        return map[key] ?: throw Exception("songid non trovato per '${track.title}' (serve un account PRO)")
+        val entries = parseAlbumSongIds(html)   // (pathNormalizzato, songid) in ordine di riga
+        val sid = entries.firstOrNull { it.first == key }?.second
+            ?: track.albumOrderNumber?.let { n -> entries.getOrNull(n.toInt() - 1)?.second }
+            ?: throw Exception("songid non trovato per '${track.title}' (serve un account PRO)")
+        synchronized(songIdCache) { songIdCache[key] = sid }
+        return sid
     }
 
-    /** Mappa href .mp3 (decodificato) -> songid dalla pagina album. */
-    private fun parseAlbumSongIds(html: String): Map<String, String> {
-        val map = mutableMapOf<String, String>()
+    /** (path normalizzato, songid) per ogni riga della pagina album, in ordine. */
+    private fun parseAlbumSongIds(html: String): List<Pair<String, String>> {
+        val out = mutableListOf<Pair<String, String>>()
         for (tr in Regex("""<tr>.*?</tr>""", RegexOption.DOT_MATCHES_ALL).findAll(html)) {
             val row = tr.value
             val sid = Regex("""playlistAddTo"\s+songid="(\d+)"""", RegexOption.IGNORE_CASE)
                 .find(row)?.groupValues?.get(1) ?: continue
             val href = Regex("""href="(/game-soundtracks/album/[^"/]+/[^"]+\.mp3)"""", RegexOption.IGNORE_CASE)
                 .find(row)?.groupValues?.get(1) ?: continue
-            map[decodeAll(href)] = sid
+            trackPath(href)?.let { out += it to sid }
         }
-        return map
+        return out
     }
 
     // ---------- CONDIVISIONE ----------
