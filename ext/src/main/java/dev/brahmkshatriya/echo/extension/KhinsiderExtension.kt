@@ -664,42 +664,43 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
         )
 
     /**
-     * Riga verticale per un album: fake Track non riproducibile (apre l'album al tap),
-     * come fa asmr.one — è l'unico modo per avere la lista verticale 1-riga-per-album
-     * (thumbnail a sinistra, titolo a destra) invece delle card orizzontali.
+     * Fake Track non riproducibile per un album (pattern di asmr.one):
+     * la riga verticale mostra copertina + titolo; al tap Echo apre l'album
+     * (isPlayable = No con reason "Album Required").
      */
-    private fun albumToRowShelf(album: Album): Shelf.Lists.Tracks =
-        Shelf.Lists.Tracks(
+    private fun albumToFakeTrack(album: Album): Track =
+        Track(
             id = album.id,
-            title = "",
-            list = listOf(
-                Track(
-                    id = album.id,
-                    title = album.title,
-                    album = album,
-                    cover = album.cover,
-                    duration = 0,
-                    isPlayable = Track.Playable.No(reason = "Album Required"),
-                    isRadioSupported = false,
-                    isShareable = false,
-                    isLikeable = false,
-                    isSaveable = false,
-                    streamables = listOf(Streamable.server(id = "OPEN_ALBUM", quality = 1, title = null)),
-                )
-            ),
+            title = album.title,
+            album = album.copy(trackCount = 0, subtitle = null),
+            cover = album.cover,
+            duration = 0,
+            isPlayable = Track.Playable.No(reason = "Album Required"),
+            isRadioSupported = false,
+            isShareable = false,
+            isLikeable = false,
+            isSaveable = false,
+            streamables = listOf(Streamable.server(id = "OPEN_ALBUM", quality = 1, title = null)),
         )
 
     /**
-     * Album di una pagina piattaforma/tipo, come lista verticale di righe.
-     * La "Top 12" del sito compare in cima a OGNI pagina (verificato su pagina 2+):
-     * vengono quindi saltati sempre i primi 12 link della pagina.
-     * NOTA: tipo di ritorno esplicito PagedData<Shelf> (evita l'errore CapturedType).
+     * Album di una pagina piattaforma/tipo, come UN'UNICA lista verticale di righe
+     * (una Shelf.Lists.Tracks per pagina, niente sezioni per-album).
+     * La "Top 12" del sito compare in cima a OGNI pagina: vengono sempre saltati
+     * i primi 12 link. Paginazione con ?page=N.
      */
     private fun platformPaged(path: String): PagedData<Shelf> = PagedData.Continuous { key ->
         val sitePage = key?.toIntOrNull() ?: 1
         val url = if (sitePage == 1) "$KHI$path" else "$KHI$path?page=$sitePage"
         val items = scrapeAlbumList(url, 30, null, 12)
-        val shelves: List<Shelf> = items.map { albumToRowShelf(it) }
+        val shelves: List<Shelf> = if (items.isEmpty()) emptyList()
+        else listOf(
+            Shelf.Lists.Tracks(
+                id = "pf-${path.substringAfterLast('/')}-p$sitePage",
+                title = "",
+                list = items.map { albumToFakeTrack(it) },
+            )
+        )
         val next = if (items.size >= 30) (sitePage + 1).toString() else null
         Page(shelves, next)
     }
@@ -804,15 +805,18 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
         // così dopo un login riuscito il WebView finisce su una pagina che esiste solo
         // da autenticati e il flusso si ferma SOLO a login davvero completato.
         override val initialUrl =
-            "https://downloads.khinsider.com/forums/login?redirect=%2Fcp%2Ffavorites"
+            "https://downloads.khinsider.com/forums/login?redirect=%2Fcp%2Favorites"
                 .toGetRequest(mapOf("User-Agent" to UA))
 
         // IMPORTANTE: Echo confronta questa regex con TUTTE le richieste della WebView,
-        // anche CSS/JS/immagini. Combacia quindi SOLO con la destinazione post-login:
-        // css.php, js/... e la pagina di login non la attivano mai, altrimenti
-        // la WebView si chiuderebbe in pochi millisecondi prima di mostrare il modulo.
+        // anche CSS/JS/immagini. Deve combaciare con la DESTINAZIONE post-login ma MAI
+        // con la pagina di login stessa.
+        // Il forum ora usa gli URL "index.php" (pretty URLs off): dopo il login XenForo
+        // atterra su /forums/index.php (non più su /forums), che la vecchia regex non
+        // riconosceva -> il WebView non si fermava -> login apparentemente fallito.
+        // Le pagine login/register vengono escluse con il lookahead negativo.
         override val stopUrlRegex =
-            Regex("""https://downloads\.khinsider\.com/(cp/favorites|forums)(/|(\?.*))?$""")
+            Regex("""https://downloads\.khinsider\.com/(cp/favorites|forums/index\.php|forums)(?!/login|/index\.php\?login|/index\.php\?register)(/|(\?.*))?$""")
 
         override suspend fun onStop(url: NetworkRequest, cookie: String): List<User> {
             val preview = cookie.take(120)
@@ -913,7 +917,7 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
             val n = it.groupValues[1].trim()
             if (n.isNotBlank()) return n
         }
-        // Link XenForo ai profili: /members/{nome}.{id}/ (presente nel menu utente loggato)
+        // Link XenForo ai profili: /members/{nome}.{id}/ (formato confermato sul sito)
         Regex("""href="[^"]*/members/([^"/.]+)\.\d+/"""", RegexOption.IGNORE_CASE).find(mainHtml)?.let {
             val n = it.groupValues[1].trim()
             if (n.isNotBlank()) return n
@@ -1516,7 +1520,8 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
     // ---------- Album ----------
 
     // Cache LRU (max 20 album) dei metadati: evita di riscaricare l'album
-    // a ogni tap quando si alternano pochi album di fila.
+    // a ogni tap quando si alternano pochi album di fila. Solo le risposte
+    // riuscite vengono memorizzate (niente "0 tracce" da fallimenti transitori).
     private val albumMetaCache = object : LinkedHashMap<String, JsonObject>(16, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, JsonObject>?): Boolean = size > 20
     }
@@ -1525,9 +1530,7 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
         synchronized(albumMetaCache) { albumMetaCache[id]?.let { return it } }
         val json = runCatching {
             getJson(apiUrl("/api/album", mapOf("url" to id))).jsonObject
-        }.getOrElse {
-            buildJsonObject { put("name", "") }
-        }
+        }.getOrNull() ?: return buildJsonObject { put("name", "") }
         synchronized(albumMetaCache) { albumMetaCache[id] = json }
         return json
     }
@@ -1537,8 +1540,45 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
         return albumMeta(album.id).toAlbumDetails(album)
     }
 
-    override suspend fun loadTracks(album: Album): Feed<Track>? =
-        albumMeta(album.id).toTracks(album).toFeed()
+    override suspend fun loadTracks(album: Album): Feed<Track>? {
+        val mirror = runCatching { albumMeta(album.id).toTracks(album) }.getOrDefault(emptyList())
+        if (mirror.isNotEmpty()) return mirror.toFeed()
+        // Fallback: mirror vuoto/assente -> tracce dalla pagina album del sito,
+        // così l'album si apre SEMPRE con le sue tracce (mai "0 tracce").
+        val html = runCatching { khinsiderGet("$KHI${album.id}") }.getOrDefault("")
+        return parseAlbumPageTracks(html, album).toFeed()
+    }
+
+    /** Tracce dalla pagina album del sito (struttura verificata sulla pagina reale). */
+    private fun parseAlbumPageTracks(html: String, album: Album): List<Track> {
+        val out = mutableListOf<Track>()
+        for (tr in Regex("""<tr>.*?</tr>""", RegexOption.DOT_MATCHES_ALL).findAll(html)) {
+            val row = tr.value
+            val mp3 = Regex("""href="(/game-soundtracks/album/[^"/]+/[^"]+\.mp3)"""", RegexOption.IGNORE_CASE)
+                .find(row)?.groupValues?.get(1) ?: continue
+            val flac = Regex("""href="(/game-soundtracks/album/[^"/]+/[^"]+\.flac)"""", RegexOption.IGNORE_CASE)
+                .find(row)?.groupValues?.get(1)
+            val title = Regex("""<td class="clickable-row">\s*<a href="[^"]+\.mp3"[^>]*>(.*?)</a>""", RegexOption.DOT_MATCHES_ALL)
+                .find(row)?.groupValues?.get(1)?.let { stripHtml(it) }
+                ?: continue
+            val duration = Regex("""style="font-weight:normal;">(\d+:\d+)</a>""")
+                .find(row)?.groupValues?.get(1)?.let { parseDuration(it) }
+            val number = Regex("""<td align="right" style="padding-right: 8px;">(\d+)\.</td>""")
+                .find(row)?.groupValues?.get(1)?.toLongOrNull()
+            out += Track(
+                id = mp3,
+                title = title,
+                album = album,
+                cover = album.cover,
+                duration = duration,
+                albumOrderNumber = number,
+                isShareable = true,
+                streamables = listOf(Streamable.server(id = mp3, quality = 4, title = "MP3")) +
+                    (if (flac != null) listOf(Streamable.server(id = flac, quality = 7, title = "FLAC")) else emptyList()),
+            )
+        }
+        return out
+    }
 
     override suspend fun loadFeed(album: Album): Feed<Shelf>? = null
 
