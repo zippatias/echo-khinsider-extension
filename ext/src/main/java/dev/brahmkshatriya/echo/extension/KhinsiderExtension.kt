@@ -1164,6 +1164,8 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
         return parsePlaylistTracks(html, playlist).toFeed()
     }
 
+    override suspend fun loadFeed(playlist: Playlist): Feed<Shelf>? = null
+
     /**
      * Parser delle tracce della pagina playlist (struttura verificata):
      * righe <tr songid="..." playlistid="..."> con link al file .mp3
