@@ -17,7 +17,6 @@ import dev.brahmkshatriya.echo.common.helpers.ClientException
 import dev.brahmkshatriya.echo.common.helpers.ContinuationCallback.Companion.await
 import dev.brahmkshatriya.echo.common.helpers.Page
 import dev.brahmkshatriya.echo.common.helpers.PagedData
-import dev.brahmkshatriya.echo.common.helpers.WebViewRequest
 import dev.brahmkshatriya.echo.common.models.Album
 import dev.brahmkshatriya.echo.common.models.Artist
 import dev.brahmkshatriya.echo.common.models.Date as EchoDate
@@ -26,8 +25,6 @@ import dev.brahmkshatriya.echo.common.models.Feed
 import dev.brahmkshatriya.echo.common.models.Feed.Companion.toFeed
 import dev.brahmkshatriya.echo.common.models.Feed.Companion.toFeedData
 import dev.brahmkshatriya.echo.common.models.ImageHolder.Companion.toImageHolder
-import dev.brahmkshatriya.echo.common.models.NetworkRequest
-import dev.brahmkshatriya.echo.common.models.NetworkRequest.Companion.toGetRequest
 import dev.brahmkshatriya.echo.common.models.Playlist
 import dev.brahmkshatriya.echo.common.models.Shelf
 import dev.brahmkshatriya.echo.common.models.Streamable
@@ -53,12 +50,14 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import kotlin.math.absoluteValue
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 import java.net.URLDecoder
 import java.net.URLEncoder
 
-class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, AlbumClient, TrackClient, LibraryFeedClient, LoginClient.WebView, LikeClient, SaveClient, ShareClient, PlaylistClient, PlaylistEditClient, PlaylistEditPrivacyClient {
+class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, AlbumClient, TrackClient, LibraryFeedClient, LoginClient.CustomInput, LikeClient, SaveClient, ShareClient, PlaylistClient, PlaylistEditClient, PlaylistEditPrivacyClient {
 
     private val client = OkHttpClient()
     private val noRedirectClient = OkHttpClient.Builder().followRedirects(false).build()
@@ -137,6 +136,7 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
             "viewed" to "Attualmente Visti", "favs" to "Più Preferiti",
             "my_favs" to "I Miei Preferiti", "history" to "Cronologia", "my_uploads" to "I Miei Album",
             "playlists" to "Le Mie Playlist", "tracks" to "tracce", "login_ok" to "Login effettuato",
+            "login_user" to "Nome utente", "login_pass" to "Password", "login_label" to "Account khinsider",
             "album" to "Album", "page" to "Pagina", "latest_search" to "Ultimi arrivi",
             "year" to "Anno",
             "lang_label" to "Lingua interfaccia",
@@ -156,6 +156,7 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
             "viewed" to "Currently Viewed", "favs" to "Most Favorites",
             "my_favs" to "My Favorites", "history" to "History", "my_uploads" to "My Albums",
             "playlists" to "My Playlists", "tracks" to "tracks", "login_ok" to "Logged in",
+            "login_user" to "Username", "login_pass" to "Password", "login_label" to "Khinsider account",
             "album" to "Album", "page" to "Page", "latest_search" to "Latest additions",
             "year" to "Year",
             "lang_label" to "Interface language",
@@ -175,6 +176,7 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
             "viewed" to "現在視聴中", "favs" to "お気に入り上位",
             "my_favs" to "マイお気に入り", "history" to "履歴", "my_uploads" to "マイアルバム",
             "playlists" to "マイプレイリスト", "tracks" to "曲", "login_ok" to "ログイン済み",
+            "login_user" to "ユーザー名", "login_pass" to "パスワード", "login_label" to "khinsiderアカウント",
             "album" to "アルバム", "page" to "ページ", "latest_search" to "最新の追加",
             "year" to "年",
             "lang_label" to "インターフェース言語",
@@ -642,7 +644,7 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
         )
     }
 
-    // ---------- CATEGORIE (Console / Tipo) — layout compatto come asmr.one ----------
+    // ---------- CATEGORIE (Console / Tipo) — griglia di bottoni come richiesto ----------
 
     /**
      * Griglia compatta di voci testuali (Shelf.Lists.Categories). Ogni voce è una
@@ -664,30 +666,10 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
         )
 
     /**
-     * Fake Track non riproducibile per un album (pattern di asmr.one):
-     * la riga verticale mostra copertina + titolo; al tap Echo apre l'album
-     * (isPlayable = No con reason "Album Required").
-     */
-    private fun albumToFakeTrack(album: Album): Track =
-        Track(
-            id = album.id,
-            title = album.title,
-            album = album.copy(trackCount = 0, subtitle = null),
-            cover = album.cover,
-            duration = 0,
-            isPlayable = Track.Playable.No(reason = "Album Required"),
-            isRadioSupported = false,
-            isShareable = false,
-            isLikeable = false,
-            isSaveable = false,
-            streamables = listOf(Streamable.server(id = "OPEN_ALBUM", quality = 1, title = null)),
-        )
-
-    /**
-     * Album di una pagina piattaforma/tipo, come UN'UNICA lista verticale di righe
-     * (una Shelf.Lists.Tracks per pagina, niente sezioni per-album).
-     * La "Top 12" del sito compare in cima a OGNI pagina: vengono sempre saltati
-     * i primi 12 link. Paginazione con ?page=N.
+     * Album di una pagina piattaforma/tipo: il layout più semplice (Shelf.Lists.Items).
+     * La "Top 12" del sito compare in cima a OGNI pagina (verificato su pagina 2+):
+     * vengono quindi saltati sempre i primi 12 link. Le pagine successive si caricano
+     * con ?page=N scorrendo fino in fondo.
      */
     private fun platformPaged(path: String): PagedData<Shelf> = PagedData.Continuous { key ->
         val sitePage = key?.toIntOrNull() ?: 1
@@ -695,16 +677,17 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
         val items = scrapeAlbumList(url, 30, null, 12)
         val shelves: List<Shelf> = if (items.isEmpty()) emptyList()
         else listOf(
-            Shelf.Lists.Tracks(
+            Shelf.Lists.Items(
                 id = "pf-${path.substringAfterLast('/')}-p$sitePage",
                 title = "",
-                list = items.map { albumToFakeTrack(it) },
+                list = items,
             )
         )
         val next = if (items.size >= 30) (sitePage + 1).toString() else null
         Page(shelves, next)
     }
 
+    /** Feed di una sezione con lente di ricerca nativa in alto a destra (filtra gli album caricati). */
     private fun platformFeed(path: String): Feed<Shelf> =
         Feed(emptyList()) {
             platformPaged(path).toFeedData(
@@ -792,69 +775,109 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
         }
     }
 
-    // ---------- LOGIN ----------
+    // ---------- LOGIN (CustomInput: login programmatico XenForo, senza WebView) ----------
 
     private var user: User? = null
     private var cookie: String? = null
 
-    override val webViewRequest = object : WebViewRequest.Cookie<List<User>> {
-        override val dontCache = true
-
-        // Apriamo la pagina di login con ?redirect=/cp/favorites:
-        // XenForo precompila il campo nascosto "redirect" della form con questo valore,
-        // così dopo un login riuscito il WebView finisce su una pagina che esiste solo
-        // da autenticati e il flusso si ferma SOLO a login davvero completato.
-        override val initialUrl =
-            "https://downloads.khinsider.com/forums/login?redirect=%2Fcp%2Favorites"
-                .toGetRequest(mapOf("User-Agent" to UA))
-
-        // IMPORTANTE: Echo confronta questa regex con TUTTE le richieste della WebView,
-        // anche CSS/JS/immagini. Deve combaciare con la DESTINAZIONE post-login ma MAI
-        // con la pagina di login stessa.
-        // Il forum ora usa gli URL "index.php" (pretty URLs off): dopo il login XenForo
-        // atterra su /forums/index.php (non più su /forums), che la vecchia regex non
-        // riconosceva -> il WebView non si fermava -> login apparentemente fallito.
-        // Le pagine login/register vengono escluse con il lookahead negativo.
-        override val stopUrlRegex =
-            Regex("""https://downloads\.khinsider\.com/(cp/favorites|forums/index\.php|forums)(?!/login|/index\.php\?login|/index\.php\?register)(/|(\?.*))?$""")
-
-        override suspend fun onStop(url: NetworkRequest, cookie: String): List<User> {
-            val preview = cookie.take(120)
-            if (!cookie.contains("xf_session")) {
-                throw Exception(
-                    "Login non riuscito: nessuna sessione XenForo ricevuta. " +
-                        "Cookie ricevuti: $preview. " +
-                        "Assicurati di aver completato il login nella pagina web."
-                )
-            }
-
-            // Visita la home per eventuali cookie di sessione del sito principale.
-            val session = warmUpSession(cookie)
-
-            // Verifica: /cp/favorites risponde 200 con i contenuti solo se loggati.
-            val (loggedIn, mainHtml) = checkMainSession(session)
-            if (!loggedIn) {
-                val hint = if (!cookie.contains("xf_user"))
-                    " Suggerimento: nella pagina di login spunta \"Stay logged in\" (Resta connesso)."
-                else ""
-                throw Exception("Login non riuscito: impossibile verificare la sessione. Cookie ricevuti: $preview.$hint")
-            }
-
-            // Nome utente reale (es. "Zippatias") invece del nome fisso "Khinsider".
-            val accountHtml = runCatching {
-                getPageWithCookie("https://downloads.khinsider.com/forums/index.php?account/", session)
-            }.getOrDefault("")
-            val name = parseUsername(mainHtml, accountHtml) ?: t("login_ok")
-
-            return listOf(
-                User(
-                    id = "khinsider",
-                    name = name,
-                    subtitle = "Account khinsider",
-                    extras = mapOf("cookie" to session),
+    override val forms: List<LoginClient.Form>
+        get() = LoginClient.Form(
+            key = "khinsider",
+            label = t("login_label"),
+            icon = LoginClient.InputField.Type.Username,
+            inputFields = listOf(
+                LoginClient.InputField(
+                    type = LoginClient.InputField.Type.Username,
+                    key = "username",
+                    label = t("login_user"),
+                    isRequired = true,
+                ),
+                LoginClient.InputField(
+                    type = LoginClient.InputField.Type.Password,
+                    key = "password",
+                    label = t("login_pass"),
+                    isRequired = true,
                 )
             )
+        ).let { listOf(it) }
+
+    override suspend fun getCurrentUser(): User? = user
+
+    /**
+     * Login programmatico su XenForo:
+     * 1) GET della pagina di login -> cookie di sessione + _xfToken del form
+     * 2) POST delle credenziali + token -> Set-Cookie con xf_user se riuscito
+     * 3) verifica sessione su /cp/favorites
+     */
+    override suspend fun onLogin(key: String, data: Map<String, String?>): List<User> {
+        val username = data["username"]?.trim().orEmpty()
+        val password = data["password"].orEmpty()
+        if (username.isEmpty() || password.isEmpty()) throw Exception("Inserisci username e password")
+
+        // 1) GET pagina di login
+        val loginPageUrl = "$KHI/forums/index.php?login/&redirect=%2Fcp%2Favorites"
+        val firstReq = Request.Builder().url(loginPageUrl).header("User-Agent", UA).build()
+        val firstRes = client.newCall(firstReq).await()
+        val loginHtml = firstRes.body?.string() ?: ""
+        val sessionCookies = firstRes.headers("Set-Cookie").map { it.substringBefore(";") }
+        firstRes.close()
+
+        val token = Regex("""<input[^>]+name=["']_xfToken["'][^>]*>""", RegexOption.IGNORE_CASE)
+            .find(loginHtml)?.value
+            ?.let { Regex("""value=["']([^"']+)""").find(it)?.groupValues?.get(1) }
+            ?: Regex("""<input[^>]+value=["']([^"']+)["'][^>]*name=["']_xfToken["']""", RegexOption.IGNORE_CASE)
+                .find(loginHtml)?.groupValues?.get(1)
+            ?: throw Exception(
+                "Login: token del form non trovato. Il sito probabilmente mostra una verifica " +
+                    "anti-bot (Cloudflare): riprova tra qualche minuto."
+            )
+
+        // 2) POST credenziali
+        val body = "login=${URLEncoder.encode(username, "UTF-8")}" +
+            "&password=${URLEncoder.encode(password, "UTF-8")}" +
+            "&remember=1" +
+            "&_xfToken=${URLEncoder.encode(token, "UTF-8")}" +
+            "&_xfRedirect=%2Fcp%2Favorites"
+        val postReq = Request.Builder()
+            .url("$KHI/forums/index.php?login/login")
+            .header("User-Agent", UA)
+            .header("Content-Type", "application/x-www-form-urlencoded")
+            .header("Cookie", sessionCookies.joinToString("; "))
+            .post(body.toRequestBody("application/x-www-form-urlencoded".toMediaType()))
+            .build()
+        val postRes = noRedirectClient.newCall(postReq).await()
+        val code = postRes.code
+        val postCookies = postRes.headers("Set-Cookie").map { it.substringBefore(";") }
+        val postHtml = postRes.body?.string() ?: ""
+        postRes.close()
+
+        if (postHtml.contains("challenge-platform") || postHtml.contains("cf-challenge")) {
+            throw Exception("Login bloccato dal sistema anti-bot del sito (Cloudflare). Riprova tra qualche minuto.")
         }
+        val session = mergeCookies(sessionCookies.joinToString("; "), postCookies)
+        if (!session.contains("xf_user")) {
+            throw Exception("Login non riuscito (HTTP $code). Controlla username e password.")
+        }
+
+        // 3) verifica sessione sul sito principale
+        val session2 = warmUpSession(session)
+        val (loggedIn, mainHtml) = checkMainSession(session2)
+        if (!loggedIn) throw Exception("Login non riuscito: impossibile verificare la sessione.")
+
+        // Nome utente reale (se estraibile), altrimenti "Login effettuato"
+        val accountHtml = runCatching {
+            getPageWithCookie("$KHI/forums/index.php?account/", session2)
+        }.getOrDefault("")
+        val name = parseUsername(mainHtml, accountHtml) ?: t("login_ok")
+
+        return listOf(
+            User(
+                id = "khinsider",
+                name = name,
+                subtitle = "Account khinsider",
+                extras = mapOf("cookie" to session2),
+            )
+        )
     }
 
     override fun setLoginUser(user: User?) {
@@ -871,8 +894,6 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
             playlistsLoaded = false
         }
     }
-
-    override suspend fun getCurrentUser(): User? = user
 
     /** GET con cookie, senza seguire i redirect. Restituisce (loggato?, HTML della pagina). */
     private suspend fun checkMainSession(cookie: String): Pair<Boolean, String> = runCatching {
