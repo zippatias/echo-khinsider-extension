@@ -1409,6 +1409,13 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
      * Se il sito lo chiamasse diversamente, dimmelo (o cattura la richiesta da
      * DevTools) e cambio il nome dell'endpoint.
      */
+    /**
+     * Aggiunge tracce a una playlist. Endpoint dedotto dal naming del sito
+     * (song_delete, song_order_update): /playlist/song_add?playlistid=X&songid=Y.
+     * Il successo è confermato dal corpo della risposta (il JS del sito controlla
+     * che il JSON sia "1"); ogni fallimento lancia con URL e corpo della risposta
+     * per una diagnosi immediata.
+     */
     override suspend fun addTracksToPlaylist(
         playlist: Playlist, tracks: List<Track>, index: Int, new: List<Track>,
     ) {
@@ -1417,11 +1424,25 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
         for (track in new) {
             val sid = songIdOf(track, c)
             val url = "$KHI/playlist/song_add?playlistid=$pid&songid=$sid"
-            val code = httpGetStatus(url, c)
-            if (code !in 200..399) throw Exception("Aggiunta traccia '${track.title}' fallita (HTTP $code): $url")
+            val request = Request.Builder().url(url)
+                .header("User-Agent", UA)
+                .header("Cookie", c)
+                .build()
+            val response = client.newCall(request).await()
+            val code = response.code
+            val body = response.body?.string() ?: ""
+            response.close()
+            println("khinsider-playlist: add -> HTTP $code, body=${body.trim().take(150)}")
+            if (code !in 200..399 || body.trim() != "1") {
+                throw Exception(
+                    "Aggiunta traccia '${track.title}' fallita (HTTP $code): " +
+                        "$url -> risposta: ${body.trim().take(120)}"
+                )
+            }
         }
         synchronized(cachedPlaylists) { playlistsLoaded = false }
     }
+
 
     override suspend fun removeTracksFromPlaylist(
         playlist: Playlist, tracks: List<Track>, indexes: List<Int>,
@@ -1466,6 +1487,9 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
      * nel modello), prova per POSIZIONE usando albumOrderNumber.
      */
     private suspend fun songIdOf(track: Track, c: String): String {
+        // Se la traccia ha già il songid (es. letta da una playlist), usalo direttamente.
+        track.extras["songid"]?.let { return it }
+
         val key = trackPath(track.id)
             ?: throw Exception("URL traccia non valido: ${track.id}")
         synchronized(songIdCache) { songIdCache[key]?.let { return it } }
