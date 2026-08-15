@@ -91,7 +91,23 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
     // ---------- Playlist (sito, PRO) ----------
     private val cachedPlaylists = mutableListOf<Playlist>()
     private var playlistsLoaded = false
-    private val songIdCache = mutableMapOf<String, String>()    // path traccia normalizzato -> songid numerico
+        private val songIdCache = mutableMapOf<String, String>()    // path traccia normalizzato -> songid numerico
+    private var songAddEndpoint: String? = null                 // endpoint di aggiunta trovato (cache)
+    private var songAddParam1: String = "playlistid"
+    private var songAddParam2: String = "songid"
+    // Combinazioni (endpoint, nome param playlist, nome param traccia) da provare:
+    // il JS del sito è impacchettato, quindi proviamo finché il server risponde "1".
+    private val songAddCandidates = listOf(
+        "song_add" to ("playlistid" to "songid"),
+        "song_add" to ("g" to "s"),
+        "add_song" to ("playlistid" to "songid"),
+        "add_song" to ("g" to "s"),
+        "song_add_to" to ("playlistid" to "songid"),
+        "add_track" to ("playlistid" to "songid"),
+        "playlist_add" to ("playlistid" to "songid"),
+        "push" to ("g" to "s"),
+        "popup_list" to ("g" to "s"),
+    )
 
     // ---------- Cronologia locale (volatile, in memoria) ----------
     private val localHistory = LinkedHashMap<String, Pair<Long, Album>>()   // id -> (timestamp, album)
@@ -279,6 +295,7 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
     private suspend fun ajaxGetStatus(url: String, cookie: String?): Pair<Int, String> {
         val builder = Request.Builder().url(url)
             .header("User-Agent", UA)
+            .header("Referer", "$KHI/")                       // alcuni endpoint validano la provenienza
             .header("X-Requested-With", "XMLHttpRequest")
         if (cookie != null) builder.header("Cookie", cookie)
         val response = client.newCall(builder.build()).await()
@@ -1420,13 +1437,11 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
         synchronized(cachedPlaylists) { playlistsLoaded = false }
     }
 
-    /**
-     * Aggiunge tracce a una playlist. Endpoint dedotto dal naming del sito
-     * (song_delete, song_order_update): /playlist/song_add?playlistid=X&songid=Y.
-     * Il successo è confermato dal corpo della risposta (il JS del sito controlla
-     * che il JSON sia "1"); ogni fallimento lancia con URL e corpo della risposta
-     * per una diagnosi immediata. La richiesta è AJAX (X-Requested-With): senza
-     * quell'header il sito risponde con la pagina HTML invece del JSON "1".
+        /**
+     * Aggiunge tracce a una playlist. Il nome esatto dell'endpoint e dei parametri
+     * non è verificabile da fuori (il JS del sito è impacchettato): si provano le
+     * combinazioni candidate finché il server risponde "1" (la prima risposta "1"
+     * È l'aggiunta riuscita), poi le si ricordano per le tracce successive.
      */
     override suspend fun addTracksToPlaylist(
         playlist: Playlist, tracks: List<Track>, index: Int, new: List<Track>,
@@ -1435,14 +1450,49 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
         val pid = playlistNumericId(playlist.id) ?: throw Exception("id playlist non valido: ${playlist.id}")
         for (track in new) {
             val sid = songIdOf(track, c)
-            val url = "$KHI/playlist/song_add?playlistid=$pid&songid=$sid"
-            val (code, body) = ajaxGetStatus(url, c)
-            println("khinsider-playlist: add -> HTTP $code, body=${body.trim().take(150)}")
-            if (code !in 200..399 || body.trim() != "1") {
-                throw Exception(
-                    "Aggiunta traccia '${track.title}' fallita (HTTP $code): " +
-                        "$url -> risposta: ${body.trim().take(120)}"
-                )
+            val endpoint = songAddEndpoint
+            if (endpoint != null) {
+                val url = "$KHI/playlist/$endpoint?$songAddParam1=$pid&$songAddParam2=$sid"
+                val (code, body) = ajaxGetStatus(url, c)
+                println("khinsider-playlist: add -> HTTP $code, body=${body.trim().take(80)}")
+                if (code !in 200..399 || body.trim() != "1") {
+                    throw Exception(
+                        "Aggiunta traccia '${track.title}' fallita (HTTP $code): " +
+                            "$url -> risposta: ${body.trim().take(120)}"
+                    )
+                }
+            } else {
+                // Prima traccia: prova le combinazioni finché il server risponde "1".
+                var foundEndpoint: String? = null
+                var foundP1 = ""
+                var foundP2 = ""
+                var lastBody = ""
+                for ((cand, params) in songAddCandidates) {
+                    val (p1, p2) = params
+                    val url = "$KHI/playlist/$cand?$p1=$pid&$p2=$sid"
+                    val (code, body) = ajaxGetStatus(url, c)
+                    println("khinsider-playlist: probe $cand?$p1=$pid&$p2=$sid -> HTTP $code, body=${body.trim().take(60)}")
+                    if (code in 200..399 && body.trim() == "1") {
+                        foundEndpoint = cand
+                        foundP1 = p1
+                        foundP2 = p2
+                        break
+                    }
+                    lastBody = body
+                }
+                if (foundEndpoint == null) {
+                    val title = Regex("""<title>([^<]*)</title>""", RegexOption.IGNORE_CASE)
+                        .find(lastBody)?.groupValues?.get(1)
+                    throw Exception(
+                        "Aggiunta traccia '${track.title}' fallita: nessuna combinazione ha risposto \"1\" " +
+                            "(provate: ${songAddCandidates.map { it.first }.distinct().joinToString(", ")}). " +
+                            "Ultima risposta: ${if (title != null) "titolo \"$title\"" else lastBody.trim().take(150)}"
+                    )
+                }
+                songAddEndpoint = foundEndpoint
+                songAddParam1 = foundP1
+                songAddParam2 = foundP2
+                println("khinsider-playlist: combinazione trovata = /$foundEndpoint?$foundP1&$foundP2")
             }
         }
         synchronized(cachedPlaylists) { playlistsLoaded = false }
