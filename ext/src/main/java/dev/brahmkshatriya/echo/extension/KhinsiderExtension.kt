@@ -6,6 +6,9 @@ import dev.brahmkshatriya.echo.common.clients.HomeFeedClient
 import dev.brahmkshatriya.echo.common.clients.LibraryFeedClient
 import dev.brahmkshatriya.echo.common.clients.LikeClient
 import dev.brahmkshatriya.echo.common.clients.LoginClient
+import dev.brahmkshatriya.echo.common.clients.PlaylistClient
+import dev.brahmkshatriya.echo.common.clients.PlaylistEditClient
+import dev.brahmkshatriya.echo.common.clients.PlaylistEditPrivacyClient
 import dev.brahmkshatriya.echo.common.clients.SaveClient
 import dev.brahmkshatriya.echo.common.clients.ShareClient
 import dev.brahmkshatriya.echo.common.clients.SearchFeedClient
@@ -25,6 +28,7 @@ import dev.brahmkshatriya.echo.common.models.Feed.Companion.toFeedData
 import dev.brahmkshatriya.echo.common.models.ImageHolder.Companion.toImageHolder
 import dev.brahmkshatriya.echo.common.models.NetworkRequest
 import dev.brahmkshatriya.echo.common.models.NetworkRequest.Companion.toGetRequest
+import dev.brahmkshatriya.echo.common.models.Playlist
 import dev.brahmkshatriya.echo.common.models.Shelf
 import dev.brahmkshatriya.echo.common.models.Streamable
 import dev.brahmkshatriya.echo.common.models.Streamable.Media.Companion.toServerMedia
@@ -54,7 +58,7 @@ import okhttp3.Request
 import java.net.URLDecoder
 import java.net.URLEncoder
 
-class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, AlbumClient, TrackClient, LibraryFeedClient, LoginClient.WebView, LikeClient, SaveClient, ShareClient {
+class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, AlbumClient, TrackClient, LibraryFeedClient, LoginClient.WebView, LikeClient, SaveClient, ShareClient, PlaylistClient, PlaylistEditClient, PlaylistEditPrivacyClient {
 
     private val client = OkHttpClient()
     private val noRedirectClient = OkHttpClient.Builder().followRedirects(false).build()
@@ -72,6 +76,11 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
     private val albumIdCache = object : LinkedHashMap<String, String>(16, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?): Boolean = size > 20
     }
+
+    // ---------- Playlist (sito, PRO) ----------
+    private val cachedPlaylists = mutableListOf<Playlist>()
+    private var playlistsLoaded = false
+    private val songIdCache = mutableMapOf<String, String>()    // href traccia (decodificato) -> songid numerico
 
     // ---------- Cronologia locale (volatile, in memoria) ----------
     private val localHistory = LinkedHashMap<String, Pair<Long, Album>>()   // id -> (timestamp, album)
@@ -127,6 +136,7 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
             "top6m" to "Top 100 Ultimi 6 Mesi", "topnew" to "Top 100 Nuovi",
             "viewed" to "Attualmente Visti", "favs" to "Più Preferiti",
             "my_favs" to "I Miei Preferiti", "history" to "Cronologia", "my_uploads" to "I Miei Album",
+            "playlists" to "Le Mie Playlist", "tracks" to "tracce",
             "album" to "Album", "page" to "Pagina", "latest_search" to "Ultimi arrivi",
             "year" to "Anno",
             "lang_label" to "Lingua interfaccia",
@@ -145,6 +155,7 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
             "top6m" to "Top 100 Last 6 Months", "topnew" to "Top 100 Newly Added",
             "viewed" to "Currently Viewed", "favs" to "Most Favorites",
             "my_favs" to "My Favorites", "history" to "History", "my_uploads" to "My Albums",
+            "playlists" to "My Playlists", "tracks" to "tracks",
             "album" to "Album", "page" to "Page", "latest_search" to "Latest additions",
             "year" to "Year",
             "lang_label" to "Interface language",
@@ -163,6 +174,7 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
             "top6m" to "過去6ヶ月トップ100", "topnew" to "新着トップ100",
             "viewed" to "現在視聴中", "favs" to "お気に入り上位",
             "my_favs" to "マイお気に入り", "history" to "履歴", "my_uploads" to "マイアルバム",
+            "playlists" to "マイプレイリスト", "tracks" to "曲",
             "album" to "アルバム", "page" to "ページ", "latest_search" to "最新の追加",
             "year" to "年",
             "lang_label" to "インターフェース言語",
@@ -235,6 +247,16 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
         return response.body?.string() ?: throw Exception("Risposta vuota")
     }
 
+    /** GET di sola verifica: restituisce lo status code (HTTP 2xx/3xx = ok). */
+    private suspend fun httpGetStatus(url: String, cookie: String?): Int {
+        val builder = Request.Builder().url(url).header("User-Agent", UA)
+        if (cookie != null) builder.header("Cookie", cookie)
+        val response = client.newCall(builder.build()).await()
+        val code = response.code
+        response.close()
+        return code
+    }
+
     /** Retry con backoff: 3 tentativi, attesa 500ms/1s tra i tentativi. */
     private suspend fun <T> withRetry(attempts: Int = 3, block: suspend () -> T): T {
         var last: Exception? = null
@@ -251,7 +273,7 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
 
     /**
      * Normalizza un URL già percent-encoded (possibilmente DUE volte, come li
-     * restituisce vgmtreasurechest: %20 -> %2520). Due decodifiche sono sicure
+     * restituisce il sito: %20 -> %2520 nell'HTML). Due decodifiche sono sicure
      * anche su URL singolarmente codificati (la seconda non cambia nulla).
      */
     private fun decodeAll(url: String): String = URLDecoder.decode(URLDecoder.decode(url, "UTF-8"), "UTF-8")
@@ -264,8 +286,6 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
      */
     private fun imageUrl(raw: String?, size: String): String? {
         if (raw.isNullOrBlank()) return null
-        // Toglie l'eventuale segmento di dimensione già presente, così qualsiasi
-        // sorgente (HTML, API) viene normalizzata prima di applicare la taglia.
         val clean = raw.replace("/thumbs_small/", "/").replace("/thumbs/", "/")
         val target = when (size) {
             "small" -> Regex("""(soundtracks/[^/]+)/""").replace(clean, "$1/thumbs_small/")
@@ -308,6 +328,9 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
             else -> 0
         }
     }
+
+    private fun stripHtml(raw: String): String =
+        Regex("""<[^>]+>""").replace(raw, " ").replace(Regex("""\s+"""), " ").trim()
 
     // ---------- Risoluzione audio ----------
 
@@ -520,8 +543,6 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
         }
         val imgs = Regex("""<img[^>]+src="([^"]+)"""", RegexOption.IGNORE_CASE)
             .findAll(region).map { it.groupValues[1] }.toList()
-        // Preferisce le immagini di copertina (path con "soundtracks" o "thumbs"),
-        // per non prendere per sbaglio loghi o icone della pagina.
         return imgs.lastOrNull { it.contains("soundtracks", true) || it.contains("thumbs", true) }
     }
 
@@ -573,9 +594,7 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
             val slug = match.groupValues[1].trim()
             if (slug.isBlank()) continue
             val inner = match.groupValues[2]
-            val title = Regex("""<[^>]+>""").replace(inner, " ")
-                .replace(Regex("""\s+"""), " ").trim()
-                .replace("&amp;", "&").replace("&quot;", "\"")
+            val title = stripHtml(inner).replace("&amp;", "&").replace("&quot;", "\"")
                 .replace("&#39;", "'").replace("&lt;", "<").replace("&gt;", ">")
             val coverInAnchor = Regex("""<img[^>]+src="([^"]+)"""", RegexOption.IGNORE_CASE)
                 .find(inner)?.groupValues?.get(1)
@@ -643,26 +662,28 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
     /**
      * Album di una pagina piattaforma/tipo: salta la "Top 12" del sito (primi 12
      * link della pagina) e pagina le pagine successive con ?page=N.
+     * NOTA: tipo di ritorno esplicito PagedData<Shelf> (evita il problema di
+     * inferenza "CapturedType" che dava errore di compilazione).
      */
+    private fun platformPaged(path: String): PagedData<Shelf> = PagedData.Continuous { key ->
+        val sitePage = key?.toIntOrNull() ?: 1
+        val skip = if (sitePage == 1) 12 else 0
+        val url = if (sitePage == 1) "$KHI$path" else "$KHI$path?page=$sitePage"
+        val items = scrapeAlbumList(url, 30, null, skip)
+        val shelves: List<Shelf> = if (items.isEmpty()) emptyList()
+        else listOf(
+            Shelf.Lists.Items(
+                id = "pf-${path.substringAfterLast('/')}-p$sitePage",
+                title = t("album"),
+                list = items,
+            )
+        )
+        val next = if (items.size + skip >= 30) (sitePage + 1).toString() else null
+        Page(shelves, next)
+    }
+
     private fun platformFeed(path: String): Feed<Shelf> =
-        Feed(emptyList()) {
-            PagedData.Continuous<Shelf> { key ->
-                val sitePage = key?.toIntOrNull() ?: 1
-                val skip = if (sitePage == 1) 12 else 0
-                val url = if (sitePage == 1) "$KHI$path" else "$KHI$path?page=$sitePage"
-                val items = scrapeAlbumList(url, 30, null, skip)
-                val shelves = if (items.isEmpty()) emptyList()
-                else listOf(
-                    Shelf.Lists.Items(
-                        id = "pf-${path.substringAfterLast('/')}-p$sitePage",
-                        title = t("album"),
-                        list = items,
-                    )
-                )
-                val next = if (items.size + skip >= 30) (sitePage + 1).toString() else null
-                Page(shelves, next)
-            }.toFeedData()
-        }
+        Feed(emptyList()) { platformPaged(path).toFeedData() }
 
     // ---------- TOP 100 / elenchi con "vedi tutto" ----------
 
@@ -677,33 +698,34 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
      * "Vedi tutto" di una lista: continua dalla fine dell'anteprima, 100 album per
      * pagina del sito (?page=N). Ferma la paginazione su pagina vuota o ripetuta.
      */
-    private fun listMoreFeed(path: String, preview: Int): Feed<Shelf> {
+    private fun listMorePaged(path: String, preview: Int): PagedData<Shelf> {
         var prevFirst: String? = null
-        return Feed(emptyList()) {
-            PagedData.Continuous<Shelf> { key ->
-                val sitePage = key?.toIntOrNull() ?: 1
-                val skip = if (sitePage == 1) preview else 0
-                val url = if (sitePage == 1) "$KHI$path" else "$KHI$path?page=$sitePage"
-                val items = scrapeAlbumList(url, 100, null, skip)
-                val first = items.firstOrNull()?.id
-                val shelves = if (items.isEmpty()) emptyList()
-                else listOf(
-                    Shelf.Lists.Items(
-                        id = "top-${path.substringAfterLast('/')}-p$sitePage",
-                        title = t("page"),
-                        list = items,
-                    )
+        return PagedData.Continuous { key ->
+            val sitePage = key?.toIntOrNull() ?: 1
+            val skip = if (sitePage == 1) preview else 0
+            val url = if (sitePage == 1) "$KHI$path" else "$KHI$path?page=$sitePage"
+            val items = scrapeAlbumList(url, 100, null, skip)
+            val first = items.firstOrNull()?.id
+            val shelves: List<Shelf> = if (items.isEmpty()) emptyList()
+            else listOf(
+                Shelf.Lists.Items(
+                    id = "top-${path.substringAfterLast('/')}-p$sitePage",
+                    title = t("page"),
+                    list = items,
                 )
-                val next = when {
-                    first == null || first == prevFirst -> null          // pagina vuota o ripetuta
-                    items.size + skip >= 100 -> { prevFirst = first; (sitePage + 1).toString() }
-                    else -> null
-                }
-                if (first != null) prevFirst = first
-                Page(shelves, next)
-            }.toFeedData()
+            )
+            val next = when {
+                first == null || first == prevFirst -> null          // pagina vuota o ripetuta
+                items.size + skip >= 100 -> { prevFirst = first; (sitePage + 1).toString() }
+                else -> null
+            }
+            if (first != null) prevFirst = first
+            Page(shelves, next)
         }
     }
+
+    private fun listMoreFeed(path: String, preview: Int): Feed<Shelf> =
+        Feed(emptyList()) { listMorePaged(path, preview).toFeedData() }
 
     // ---------- HOME ----------
 
@@ -727,10 +749,10 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
                     )
                 }.toFeedData()
                 "console" -> PagedData.Single {
-                    listOf(platformCategories("console", t("console"), platforms))
+                    listOf<Shelf>(platformCategories("console", t("console"), platforms))
                 }.toFeedData(buttons = Feed.Buttons(showSearch = true, showSort = false, showPlayAndShuffle = false))
                 "tipo" -> PagedData.Single {
-                    listOf(platformCategories("tipo", t("tipo"), types))
+                    listOf<Shelf>(platformCategories("tipo", t("tipo"), types))
                 }.toFeedData(buttons = Feed.Buttons(showSearch = true, showSort = false, showPlayAndShuffle = false))
                 else -> PagedData.Single {
                     listOfNotNull(
@@ -808,11 +830,15 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
     override fun setLoginUser(user: User?) {
         this.user = user
         this.cookie = user?.extras?.get("cookie")
-        // Cambio utente/logout: la prossima volta i preferiti verranno riscaricati.
+        // Cambio utente/logout: la prossima volta preferiti e playlist verranno riscaricati.
         synchronized(favoriteSlugs) {
             favoriteSlugs.clear()
             cachedFavorites.clear()
             favoritesLoaded = false
+        }
+        synchronized(cachedPlaylists) {
+            cachedPlaylists.clear()
+            playlistsLoaded = false
         }
     }
 
@@ -1014,25 +1040,14 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
      * /cp/edit_album_details?albumid=N (senza virgolette).
      */
     private fun findAlbumIdInPage(html: String): String? {
-        // 1) URL letterale del toggle, se il bottone fosse un link diretto
         Regex("""album_favorite_toggle\?albumid=(\d+)""").find(html)?.let { return it.groupValues[1] }
-        // 2) Parametro query "albumid=NNN" senza virgolette: il link di modifica
-        //    /cp/edit_album_details?albumid=102359 è presente in ogni pagina album
         Regex("""albumid=(\d+)""", RegexOption.IGNORE_CASE).find(html)?.let { return it.groupValues[1] }
-        // 3) Attributo con virgolette, come sulle icone di /cp/favorites (albumid="70421")
         Regex("""albumid\s*=\s*["'](\d+)""", RegexOption.IGNORE_CASE).find(html)?.let { return it.groupValues[1] }
-        // 4) Attributo data-album-id / data-albumid
         Regex("""data-album-?id\s*=\s*["']?(\d+)""", RegexOption.IGNORE_CASE).find(html)?.let { return it.groupValues[1] }
-        // 5) Input nascosto di un form
         Regex("""name=["']albumid["'][^>]*?value=["'](\d+)""", RegexOption.IGNORE_CASE).find(html)?.let { return it.groupValues[1] }
         Regex("""value=["'](\d+)["'][^>]*?name=["']albumid["']""", RegexOption.IGNORE_CASE).find(html)?.let { return it.groupValues[1] }
-        // 6) Variabile/oggetto JS tipo: {albumid:102359} o var album_id = 102359;
         Regex("""(?:album_?id|ALBUM_ID)\s*[:=]\s*["']?(\d{4,7})""", RegexOption.IGNORE_CASE).find(html)?.let { return it.groupValues[1] }
-        // 7) Chiamata JS tipo: toggleFavorite(102359) / setFav(102359)
         Regex("""(?:favorite|fav)\w*\s*\(\s*["']?(\d{4,7})""", RegexOption.IGNORE_CASE).find(html)?.let { return it.groupValues[1] }
-        // 8) Ultima spiaggia: il JS del sito è impacchettato e l'albumid compare come
-        //    token del dizionario subito dopo "album_favorite_toggle"
-        //    (es. ...|album_favorite_toggle|102359|albumFavorite|...)
         Regex("""album_favorite_toggle\|(\d{4,7})""").find(html)?.let { return it.groupValues[1] }
         return null
     }
@@ -1082,6 +1097,264 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
     override suspend fun saveToLibrary(item: EchoMediaItem, shouldSave: Boolean) = setFavorite(item, shouldSave)
 
     override suspend fun isItemSaved(item: EchoMediaItem): Boolean = isFavorite(item)
+
+    // ---------- PLAYLIST (richiede account PRO sul sito) ----------
+
+    /** Playlist lette una volta per sessione (come i preferiti). */
+    private suspend fun ensurePlaylists(c: String): List<Playlist> {
+        synchronized(cachedPlaylists) { if (playlistsLoaded) return cachedPlaylists.toList() }
+        return refreshPlaylists(c)
+    }
+
+    private suspend fun refreshPlaylists(c: String): List<Playlist> {
+        val html = runCatching { khinsiderGet("$KHI/playlist/browse", c) }.getOrDefault("")
+        if (html.contains(">Log In") || html.contains("/forums/login")) return emptyList()
+        val parsed = parsePlaylistPage(html)
+        synchronized(cachedPlaylists) {
+            cachedPlaylists.clear()
+            cachedPlaylists.addAll(parsed)
+            playlistsLoaded = true
+        }
+        return parsed
+    }
+
+    /** Estrae le playlist dalla pagina /playlist/browse (righe di tabella). */
+    private fun parsePlaylistPage(html: String): List<Playlist> {
+        val result = mutableListOf<Playlist>()
+        for (tr in Regex("""<tr>.*?</tr>""", RegexOption.DOT_MATCHES_ALL).findAll(html)) {
+            val row = tr.value
+            val href = Regex("""/playlist/([^"/]+)""").find(row)?.groupValues?.get(1) ?: continue
+            val name = Regex("""<td><a href="/playlist/[^"/]+"[^>]*>(.*?)</a></td>""", RegexOption.DOT_MATCHES_ALL)
+                .find(row)?.groupValues?.get(1)
+                ?.let { stripHtml(it) }
+                ?: continue
+            if (name.isBlank() || name.all { it.isDigit() }) continue   // ignora la cella del conteggio
+            val count = Regex("""<td><a href="/playlist/[^"/]+"[^>]*>(\d+)</a></td>""")
+                .find(row)?.groupValues?.get(1)?.toLongOrNull()
+            val cover = Regex("""<img[^>]+src="([^"]+)"""", RegexOption.IGNORE_CASE).find(row)?.groupValues?.get(1)
+            result += Playlist(
+                id = "/playlist/$href",
+                title = name,
+                isEditable = true,
+                isPrivate = true,          // le playlist del sito sono private (link condivisibile)
+                cover = cover?.let { imageUrl(it, shelfCoverSize)?.toImageHolder() },
+                trackCount = count,
+                subtitle = count?.let { "$it ${t("tracks")}" },
+                isShareable = true,
+            )
+        }
+        return result
+    }
+
+    /** L'id NUMERICO della playlist ("/playlist/53984ydko" -> "53984"), usato da tutti gli endpoint. */
+    private fun playlistNumericId(playlistId: String): String? =
+        Regex("""/playlist/(\d+)""").find(playlistId)?.groupValues?.get(1)
+
+    // ---------- PlaylistClient ----------
+
+    override suspend fun loadPlaylist(playlist: Playlist): Playlist {
+        val c = cookie ?: return playlist
+        val cached = runCatching { ensurePlaylists(c) }.getOrDefault(emptyList())
+        return cached.firstOrNull { it.id == playlist.id } ?: playlist
+    }
+
+    override suspend fun loadTracks(playlist: Playlist): Feed<Track> {
+        val c = cookie ?: throw ClientException.LoginRequired()
+        val html = runCatching { khinsiderGet("$KHI${playlist.id}", c) }.getOrDefault("")
+        return parsePlaylistTracks(html, playlist).toFeed()
+    }
+
+    /**
+     * Parser delle tracce della pagina playlist (struttura verificata):
+     * righe <tr songid="..." playlistid="..."> con link al file .mp3
+     * (doppio-encodato %2520, normalizzato da decodeAll all'uso),
+     * link album, durata e copertina.
+     */
+    private fun parsePlaylistTracks(html: String, playlist: Playlist): List<Track> {
+        val out = mutableListOf<Track>()
+        val pid = playlistNumericId(playlist.id) ?: ""
+        val rowRe = Regex("""<tr songid="(\d+)"[^>]*>.*?</tr>""", RegexOption.DOT_MATCHES_ALL)
+        for (tr in rowRe.findAll(html)) {
+            val row = tr.value
+            val sid = tr.groupValues[1]
+            val songCell = Regex("""<td class="clickable-row">(.*?)</td>""", RegexOption.DOT_MATCHES_ALL)
+                .find(row)?.groupValues?.get(1) ?: continue
+            val aLinks = Regex("""<a href="([^"]+)"[^>]*>(.*?)</a>""", RegexOption.DOT_MATCHES_ALL)
+                .findAll(songCell).toList()
+            if (aLinks.size < 2) continue
+            val trackHref = aLinks[0].groupValues[1]
+            if (!trackHref.endsWith(".mp3")) continue
+            val title = stripHtml(aLinks[0].groupValues[2]).ifBlank {
+                trackHref.substringAfterLast('/').substringBeforeLast('.').replace('_', ' ')
+            }
+            val albumHref = aLinks[1].groupValues[1]
+            val albumTitle = stripHtml(aLinks[1].groupValues[2]).ifBlank {
+                albumHref.substringAfterLast('/').replace('-', ' ')
+            }
+            val cover = Regex("""<td class="albumIcon">.*?<img src="([^"]+)"""", RegexOption.DOT_MATCHES_ALL)
+                .find(row)?.groupValues?.get(1)
+            val duration = Regex("""style="font-weight:normal;">(\d+:\d+)</a>""")
+                .find(row)?.groupValues?.get(1)?.let { parseDuration(it) }
+            val number = Regex("""<td align="right" style="padding-right: 8px;">(\d+)\.</td>""")
+                .find(row)?.groupValues?.get(1)?.toLongOrNull()
+            val album = Album(
+                id = albumHref,
+                title = albumTitle,
+                cover = cover?.let { imageUrl(it, trackCoverSize)?.toImageHolder() },
+                isLikeable = true,
+                isShareable = true,
+            )
+            out += Track(
+                id = trackHref,
+                title = title,
+                album = album,
+                cover = album.cover,
+                duration = duration,
+                albumOrderNumber = number,
+                isShareable = true,
+                streamables = listOf(Streamable.server(id = trackHref, quality = 4, title = "MP3")),
+                extras = mapOf("songid" to sid, "playlistid" to pid),
+            )
+        }
+        return out
+    }
+
+    // ---------- PlaylistEditClient ----------
+
+    override suspend fun listEditablePlaylists(track: Track?): List<Pair<Playlist, Boolean>> {
+        val c = cookie ?: throw ClientException.LoginRequired()
+        val list = runCatching { ensurePlaylists(c) }.getOrDefault(emptyList())
+        // "già nella playlist?" richiederebbe lo scan di ogni playlist:
+        // per ora false (il sito gestisce comunque i duplicati).
+        return list.map { it to false }
+    }
+
+    override suspend fun createPlaylist(title: String, description: String?): Playlist {
+        val c = cookie ?: throw ClientException.LoginRequired()
+        val url = "$KHI/playlist/add?name=${URLEncoder.encode(title, "UTF-8")}"
+        val request = Request.Builder().url(url)
+            .header("User-Agent", UA)
+            .header("Cookie", c)
+            .build()
+        val response = noRedirectClient.newCall(request).await()
+        val code = response.code
+        val location = response.header("Location")
+        response.close()
+        synchronized(cachedPlaylists) { playlistsLoaded = false }   // la lista va ricaricata
+        if (location != null) {
+            val id = Regex("""/playlist/([^"/?]+)""").find(location)?.groupValues?.get(1)
+            if (id != null) {
+                return Playlist(
+                    id = "/playlist/$id", title = title,
+                    isEditable = true, isPrivate = true, isShareable = true,
+                )
+            }
+        }
+        // Fallback: il sito non ha rediretto (o Location non è leggibile):
+        // ricarica la lista e cerca la nuova playlist per titolo.
+        val list = refreshPlaylists(c)
+        return list.firstOrNull { it.title == title }
+            ?: throw Exception("Creazione playlist: non trovo '$title' dopo la creazione (HTTP $code)")
+    }
+
+    override suspend fun deletePlaylist(playlist: Playlist) {
+        val c = cookie ?: throw ClientException.LoginRequired()
+        val pid = playlistNumericId(playlist.id) ?: throw Exception("id playlist non valido: ${playlist.id}")
+        val code = httpGetStatus("$KHI/playlist/delete?playlistid=$pid", c)
+        if (code !in 200..399) throw Exception("Eliminazione playlist fallita (HTTP $code)")
+        synchronized(cachedPlaylists) { playlistsLoaded = false }
+    }
+
+    override suspend fun editPlaylistMetadata(playlist: Playlist, title: String, description: String?) {
+        val c = cookie ?: throw ClientException.LoginRequired()
+        val pid = playlistNumericId(playlist.id) ?: throw Exception("id playlist non valido: ${playlist.id}")
+        val url = "$KHI/playlist/edit?playlistid=$pid&name=${URLEncoder.encode(title, "UTF-8")}"
+        val code = httpGetStatus(url, c)
+        if (code !in 200..399) throw Exception("Rinomina playlist fallita (HTTP $code)")
+        synchronized(cachedPlaylists) { playlistsLoaded = false }
+    }
+
+    /**
+     * Aggiunge tracce a una playlist. Endpoint dedotto dal naming del sito
+     * (song_delete, song_order_update): /playlist/song_add?playlistid=X&songid=Y.
+     * Se il sito lo chiamasse diversamente, dimmelo (o cattura la richiesta da
+     * DevTools) e cambio il nome dell'endpoint.
+     */
+    override suspend fun addTracksToPlaylist(
+        playlist: Playlist, tracks: List<Track>, index: Int, new: List<Track>,
+    ) {
+        val c = cookie ?: throw ClientException.LoginRequired()
+        val pid = playlistNumericId(playlist.id) ?: throw Exception("id playlist non valido: ${playlist.id}")
+        for (track in new) {
+            val sid = songIdOf(track, c)
+            val url = "$KHI/playlist/song_add?playlistid=$pid&songid=$sid"
+            val code = httpGetStatus(url, c)
+            if (code !in 200..399) throw Exception("Aggiunta traccia '${track.title}' fallita (HTTP $code): $url")
+        }
+        synchronized(cachedPlaylists) { playlistsLoaded = false }
+    }
+
+    override suspend fun removeTracksFromPlaylist(
+        playlist: Playlist, tracks: List<Track>, indexes: List<Int>,
+    ) {
+        val c = cookie ?: throw ClientException.LoginRequired()
+        val pid = playlistNumericId(playlist.id) ?: throw Exception("id playlist non valido: ${playlist.id}")
+        for (i in indexes.sortedDescending()) {
+            val track = tracks.getOrNull(i) ?: continue
+            val sid = track.extras["songid"]
+                ?: throw Exception("songid mancante per la traccia '${track.title}' (riapri la playlist)")
+            val code = httpGetStatus("$KHI/playlist/song_delete?playlistid=$pid&songid=$sid", c)
+            if (code !in 200..399) throw Exception("Rimozione traccia fallita (HTTP $code)")
+        }
+        synchronized(cachedPlaylists) { playlistsLoaded = false }
+    }
+
+    override suspend fun moveTrackInPlaylist(
+        playlist: Playlist, tracks: List<Track>, fromIndex: Int, toIndex: Int,
+    ) {
+        val c = cookie ?: throw ClientException.LoginRequired()
+        val pid = playlistNumericId(playlist.id) ?: throw Exception("id playlist non valido: ${playlist.id}")
+        val track = tracks.getOrNull(fromIndex)
+            ?: throw Exception("Traccia non trovata all'indice $fromIndex")
+        val sid = track.extras["songid"]
+            ?: throw Exception("songid mancante per la traccia '${track.title}' (riapri la playlist)")
+        // Lo script del sito invia order = posizione della riga (1-based, con header).
+        val code = httpGetStatus("$KHI/playlist/song_order_update?order=${toIndex + 1}&songid=$sid&playlistid=$pid", c)
+        if (code !in 200..399) throw Exception("Riordino traccia fallito (HTTP $code)")
+        synchronized(cachedPlaylists) { playlistsLoaded = false }
+    }
+
+    // ---------- PlaylistEditPrivacyClient ----------
+
+    override suspend fun setPrivacy(playlist: Playlist, isPrivate: Boolean) {
+        // Le playlist di khinsider sono sempre private (URL condivisibile con hash).
+        throw Exception("Privacy playlist: il sito non offre playlist pubbliche")
+    }
+
+    /** songid numerico di una traccia, letto dalla pagina album (div playlistAddTo). */
+    private suspend fun songIdOf(track: Track, c: String): String {
+        val key = decodeAll(track.id)
+        synchronized(songIdCache) { songIdCache[key]?.let { return it } }
+        val albumId = track.album?.id ?: throw Exception("album mancante per la traccia '${track.title}'")
+        val html = runCatching { khinsiderGet("$KHI$albumId", c) }.getOrDefault("")
+        val map = parseAlbumSongIds(html)
+        synchronized(songIdCache) { songIdCache.putAll(map) }
+        return map[key] ?: throw Exception("songid non trovato per '${track.title}' (serve un account PRO)")
+    }
+
+    /** Mappa href .mp3 (decodificato) -> songid dalla pagina album. */
+    private fun parseAlbumSongIds(html: String): Map<String, String> {
+        val map = mutableMapOf<String, String>()
+        for (tr in Regex("""<tr>.*?</tr>""", RegexOption.DOT_MATCHES_ALL).findAll(html)) {
+            val row = tr.value
+            val sid = Regex("""playlistAddTo"\s+songid="(\d+)"""", RegexOption.IGNORE_CASE)
+                .find(row)?.groupValues?.get(1) ?: continue
+            val href = Regex("""href="(/game-soundtracks/album/[^"/]+/[^"]+\.mp3)"""", RegexOption.IGNORE_CASE)
+                .find(row)?.groupValues?.get(1) ?: continue
+            map[decodeAll(href)] = sid
+        }
+        return map
+    }
 
     // ---------- CONDIVISIONE ----------
 
@@ -1155,6 +1428,10 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
         historyShelf()?.let { shelves += it }
         if (c != null) {
             albumsShelf("lib_uploads", t("my_uploads"), "/cp/uploads", 30, c)?.let { shelves += it }
+            val playlists = runCatching { ensurePlaylists(c) }.getOrDefault(emptyList())
+            if (playlists.isNotEmpty()) {
+                shelves += Shelf.Lists.Items(id = "lib_playlists", title = t("playlists"), list = playlists)
+            }
         }
         return Feed(emptyList()) {
             PagedData.Single { shelves }.toFeedData()
@@ -1229,7 +1506,7 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
     override suspend fun loadStreamableMedia(
         streamable: Streamable, isDownload: Boolean,
     ): Streamable.Media {
-        // Normalizza l'id (decodifica doppia: alcuni URL arrivano già percent-encoded).
+        // Normalizza l'id (decodifica doppia: il sito emette URL con %2520).
         val decoded = decodeAll(streamable.id)
         val isFlac = decoded.endsWith("#flac")
         val pageUrl = if (isFlac) decoded.removeSuffix("#flac") else decoded
