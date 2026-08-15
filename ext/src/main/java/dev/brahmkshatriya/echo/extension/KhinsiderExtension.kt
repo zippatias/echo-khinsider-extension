@@ -38,6 +38,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
@@ -79,35 +80,108 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
     // ---------- Impostazioni copertine ----------
 
     override suspend fun getSettingItems(): List<Setting> {
-        val options = listOf("Piccola", "Media", "Grande")
+        val options = listOf(t("small"), t("medium"), t("large"))
         val values = listOf("small", "medium", "full")
         return listOf(
             SettingList(
-                "Copertine nelle liste",
+                t("lang_label"),
+                "lang",
+                t("lang_desc"),
+                listOf("Italiano", "English", "日本語"),
+                listOf("it", "en", "ja"),
+                langIndex(),
+            ),
+            SettingList(
+                t("cover_shelves"),
                 "cover_size_shelves",
-                "Home, Top, Console, Tipi, Libreria e Ricerca. Piccola è la più veloce da caricare, Grande è l'immagine originale.",
+                t("cover_shelves_desc"),
                 options,
                 values,
                 sizeIndex(shelfCoverSize),
             ),
             SettingList(
-                "Copertina pagina album",
+                t("cover_album"),
                 "cover_size_album",
-                "L'immagine grande mostrata quando apri un album.",
+                t("cover_album_desc"),
                 options,
                 values,
                 sizeIndex(albumCoverSize),
             ),
             SettingList(
-                "Copertine dei brani",
+                t("cover_tracks"),
                 "cover_size_tracks",
-                "Le miniature nella lista tracce e l'immagine nella schermata di riproduzione.",
+                t("cover_tracks_desc"),
                 options,
                 values,
                 sizeIndex(trackCoverSize),
             ),
         )
     }
+
+    // ---------- Lingua interfaccia (IT / EN / JA) ----------
+
+    private val uiStrings: Map<String, Map<String, String>> = mapOf(
+        "it" to mapOf(
+            "home" to "Home", "top" to "Top", "console" to "Console", "tipo" to "Tipo",
+            "latest" to "Ultimi Arrivi", "top1000" to "Top 1000 All Time",
+            "top6m" to "Top 100 Ultimi 6 Mesi", "topnew" to "Top 100 Nuovi",
+            "viewed" to "Attualmente Visti", "favs" to "Più Preferiti",
+            "my_favs" to "I Miei Preferiti", "history" to "Cronologia", "my_uploads" to "I Miei Album",
+            "album" to "Album", "page" to "Pagina", "latest_search" to "Ultimi arrivi",
+            "year" to "Anno",
+            "lang_label" to "Lingua interfaccia",
+            "lang_desc" to "Italiano (default), Inglese o Giapponese.",
+            "cover_shelves" to "Copertine nelle liste",
+            "cover_shelves_desc" to "Home, Top, Console, Tipi, Libreria e Ricerca. Piccola è la più veloce da caricare, Grande è l'immagine originale.",
+            "cover_album" to "Copertina pagina album",
+            "cover_album_desc" to "L'immagine grande mostrata quando apri un album.",
+            "cover_tracks" to "Copertine dei brani",
+            "cover_tracks_desc" to "Le miniature nella lista tracce e l'immagine nella schermata di riproduzione.",
+            "small" to "Piccola", "medium" to "Media", "large" to "Grande",
+        ),
+        "en" to mapOf(
+            "home" to "Home", "top" to "Top", "console" to "Consoles", "tipo" to "By Type",
+            "latest" to "Latest", "top1000" to "Top 1000 All Time",
+            "top6m" to "Top 100 Last 6 Months", "topnew" to "Top 100 Newly Added",
+            "viewed" to "Currently Viewed", "favs" to "Most Favorites",
+            "my_favs" to "My Favorites", "history" to "History", "my_uploads" to "My Albums",
+            "album" to "Album", "page" to "Page", "latest_search" to "Latest additions",
+            "year" to "Year",
+            "lang_label" to "Interface language",
+            "lang_desc" to "Italian (default), English or Japanese.",
+            "cover_shelves" to "Covers in lists",
+            "cover_shelves_desc" to "Home, Top, Consoles, Types, Library and Search. Small is the fastest to load, Large is the original image.",
+            "cover_album" to "Album page cover",
+            "cover_album_desc" to "The large image shown when you open an album.",
+            "cover_tracks" to "Track covers",
+            "cover_tracks_desc" to "The thumbnails in the track list and the image in the player screen.",
+            "small" to "Small", "medium" to "Medium", "large" to "Large",
+        ),
+        "ja" to mapOf(
+            "home" to "ホーム", "top" to "トップ", "console" to "コンソール", "tipo" to "タイプ",
+            "latest" to "最新の追加", "top1000" to "全期間トップ1000",
+            "top6m" to "過去6ヶ月トップ100", "topnew" to "新着トップ100",
+            "viewed" to "現在視聴中", "favs" to "お気に入り上位",
+            "my_favs" to "マイお気に入り", "history" to "履歴", "my_uploads" to "マイアルバム",
+            "album" to "アルバム", "page" to "ページ", "latest_search" to "最新の追加",
+            "year" to "年",
+            "lang_label" to "インターフェース言語",
+            "lang_desc" to "イタリア語（既定）、英語、日本語。",
+            "cover_shelves" to "リストのカバー",
+            "cover_shelves_desc" to "ホーム・トップ・コンソール・タイプ・ライブラリ・検索。小は読み込みが最速、大は元画像。",
+            "cover_album" to "アルバムページのカバー",
+            "cover_album_desc" to "アルバムを開いたときに表示される大きな画像。",
+            "cover_tracks" to "トラックのカバー",
+            "cover_tracks_desc" to "トラック一覧のサムネイルと再生画面の画像。",
+            "small" to "小", "medium" to "中", "large" to "大",
+        ),
+    )
+
+    private val lang get() = runCatching { setting?.getString("lang") }.getOrNull() ?: "it"
+
+    private fun langIndex(): Int = when (lang) { "en" -> 1; "ja" -> 2; else -> 0 }
+
+    private fun t(key: String): String = uiStrings[lang]?.get(key) ?: uiStrings["it"]?.get(key) ?: key
 
     private val shelfCoverSize get() = sizeSetting("cover_size_shelves", "medium")
     private val albumCoverSize get() = sizeSetting("cover_size_album", "full")
@@ -160,6 +234,27 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
         if (!response.isSuccessful) throw Exception("HTTP ${response.code}")
         return response.body?.string() ?: throw Exception("Risposta vuota")
     }
+
+    /** Retry con backoff: 3 tentativi, attesa 500ms/1s tra i tentativi. */
+    private suspend fun <T> withRetry(attempts: Int = 3, block: suspend () -> T): T {
+        var last: Exception? = null
+        repeat(attempts) { i ->
+            try {
+                return block()
+            } catch (e: Exception) {
+                last = e
+                if (i < attempts - 1) delay(500L * (i + 1))
+            }
+        }
+        throw last ?: Exception("Errore sconosciuto")
+    }
+
+    /**
+     * Normalizza un URL già percent-encoded (possibilmente DUE volte, come li
+     * restituisce vgmtreasurechest: %20 -> %2520). Due decodifiche sono sicure
+     * anche su URL singolarmente codificati (la seconda non cambia nulla).
+     */
+    private fun decodeAll(url: String): String = URLDecoder.decode(URLDecoder.decode(url, "UTF-8"), "UTF-8")
 
     /**
      * URL immagine via proxy del mirror, nella dimensione richiesta:
@@ -216,14 +311,25 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
 
     // ---------- Risoluzione audio ----------
 
+    /**
+     * Trova il link diretto (MP3/FLAC) di una traccia. Prima prova la pagina
+     * download via mirror, poi la pagina traccia direttamente sul sito.
+     * Con retry e messaggio diagnostico (URL + status) in caso di fallimento.
+     */
     private suspend fun resolveAudio(pageUrl: String, format: String = "mp3"): String {
-        val html = getText(downloadUrl(pageUrl))
         val ext = if (format.equals("flac", true)) "flac" else "mp3"
         val regex = Regex("href=[\"']([^\"']+\\.$ext)[\"']", RegexOption.IGNORE_CASE)
+        val html = withRetry {
+            runCatching { getText(downloadUrl(pageUrl)) }.getOrElse {
+                val direct = khinsiderGet("$KHI$pageUrl")   // pagina traccia sul sito (fallback)
+                if (direct.isBlank()) throw Exception("Pagina download vuota per $pageUrl")
+                direct
+            }
+        }
         val candidates = regex.findAll(html).map { it.groupValues[1] }.toList()
         val link = candidates.firstOrNull { it.contains("vgmtreasurechest.com") }
             ?: candidates.firstOrNull()
-            ?: throw Exception("Link $ext non trovato nella pagina")
+            ?: throw Exception("Link $ext non trovato nella pagina $pageUrl (HTTP ok ma struttura cambiata?)")
         return if (link.startsWith("http")) link else "https://downloads.khinsider.com$link"
     }
 
@@ -254,7 +360,7 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
             trackCount = trackCount,
             releaseDate = year?.toIntOrNull()?.let { EchoDate(year = it, month = 1, day = 1) },
             description = str("description") ?: str("albumType"),
-            subtitle = year?.let { "Anno: $it" },
+            subtitle = year?.let { "${t("year")}: $it" },
             isLikeable = true,
             isShareable = true,
         )
@@ -302,33 +408,78 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
 
     private val KHI = "https://downloads.khinsider.com"
 
+    /** Lista completa delle piattaforme (fonte: /console-list, 65 voci). */
     private val platforms = listOf(
-        "NES" to "/game-soundtracks/nintendo-nes",
-        "SNES" to "/game-soundtracks/nintendo-snes",
-        "N64" to "/game-soundtracks/nintendo-64",
-        "GC" to "/game-soundtracks/nintendo-gamecube",
-        "Wii" to "/game-soundtracks/nintendo-wii",
-        "Wii U" to "/game-soundtracks/nintendo-wii-u",
-        "Switch" to "/game-soundtracks/nintendo-switch",
-        "Switch 2" to "/game-soundtracks/switch-2",
+        "3DO" to "/game-soundtracks/3do",
+        "3DS" to "/game-soundtracks/nintendo-3ds",
+        "Amiga" to "/game-soundtracks/amiga",
+        "Android" to "/game-soundtracks/android",
+        "Anime" to "/game-soundtracks/anime",
+        "Arcade" to "/game-soundtracks/arcade",
+        "Atari 8-Bit" to "/game-soundtracks/atari-8bit",
+        "Atari Jaguar" to "/game-soundtracks/atari-jaguar",
+        "Atari ST" to "/game-soundtracks/atari-st",
+        "CD-i" to "/game-soundtracks/cd-i",
+        "Commodore 64" to "/game-soundtracks/commodore-64",
+        "Dreamcast" to "/game-soundtracks/sega-dreamcast",
+        "DS" to "/game-soundtracks/nintendo-ds",
+        "Family Computer" to "/game-soundtracks/family-computer",
+        "FDS" to "/game-soundtracks/famicom-disk-system",
+        "FM Towns" to "/game-soundtracks/fm-towns",
+        "Fujitsu FM77AV" to "/game-soundtracks/fujitsu-fm77av",
+        "Game Gear" to "/game-soundtracks/sega-game-gear",
         "GB" to "/game-soundtracks/gameboy",
         "GBA" to "/game-soundtracks/gameboy-advance",
-        "DS" to "/game-soundtracks/nintendo-ds",
-        "3DS" to "/game-soundtracks/nintendo-3ds",
+        "GC" to "/game-soundtracks/nintendo-gamecube",
+        "Genesis/Mega Drive" to "/game-soundtracks/sega-mega-drive-genesis",
+        "IBM PC" to "/game-soundtracks/ibm-pc",
+        "IBM PC/AT" to "/game-soundtracks/ibm-pc-at",
+        "iOS" to "/game-soundtracks/ios",
+        "Linux" to "/game-soundtracks/linux",
+        "MacOS" to "/game-soundtracks/mac-os",
+        "Master System" to "/game-soundtracks/sega-master-system",
+        "Mobile" to "/game-soundtracks/mobile",
+        "Movie" to "/game-soundtracks/movie",
+        "MS-DOS" to "/game-soundtracks/ms-dos",
+        "MSX" to "/game-soundtracks/msx",
+        "MSX2" to "/game-soundtracks/msx2",
+        "N64" to "/game-soundtracks/nintendo-64",
+        "Neo Geo" to "/game-soundtracks/neo-geo",
+        "NES" to "/game-soundtracks/nintendo-nes",
+        "Online" to "/game-soundtracks/online",
+        "PC-88" to "/game-soundtracks/pc-8801",
+        "PC-98" to "/game-soundtracks/pc-9801",
+        "PC-9821" to "/game-soundtracks/pc-9821",
+        "PC-FX" to "/game-soundtracks/pc-fx",
+        "PS Vita" to "/game-soundtracks/playstation-vita",
         "PS1" to "/game-soundtracks/playstation",
         "PS2" to "/game-soundtracks/playstation-2",
         "PS3" to "/game-soundtracks/playstation-3",
         "PS4" to "/game-soundtracks/playstation-4",
         "PS5" to "/game-soundtracks/playstation-5",
         "PSP" to "/game-soundtracks/playstation-portable-psp",
-        "PS Vita" to "/game-soundtracks/playstation-vita",
+        "Saturn" to "/game-soundtracks/sega-saturn",
+        "Sharp X1" to "/game-soundtracks/sharp-x1",
+        "SNES" to "/game-soundtracks/nintendo-snes",
+        "Spectrum" to "/game-soundtracks/spectrum",
+        "Stadia" to "/game-soundtracks/stadia",
         "Steam" to "/game-soundtracks/steam",
+        "Switch" to "/game-soundtracks/nintendo-switch",
+        "Switch 2" to "/game-soundtracks/switch-2",
+        "TurboGrafx-16" to "/game-soundtracks/turbografx-16",
+        "Virtual Boy" to "/game-soundtracks/virtual-boy",
+        "VR" to "/game-soundtracks/virtual-reality",
+        "Wii" to "/game-soundtracks/nintendo-wii",
+        "Wii U" to "/game-soundtracks/nintendo-wii-u",
         "Windows" to "/game-soundtracks/windows",
+        "X68000" to "/game-soundtracks/x68000",
         "Xbox" to "/game-soundtracks/xbox",
         "Xbox 360" to "/game-soundtracks/xbox-360",
         "Xbox One" to "/game-soundtracks/xbox-one",
+        "Xbox Series X/S" to "/game-soundtracks/xbox-series-x",
     )
 
+    /** Voci "Tipo", più la sezione Anime Soundtracks (piattaforma con paginazione). */
     private val types = listOf(
         "Gamerips" to "/game-soundtracks/gamerips",
         "Soundtracks" to "/game-soundtracks/ost",
@@ -337,6 +488,7 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
         "Remixes" to "/game-soundtracks/remixes",
         "Compilations" to "/game-soundtracks/compilations",
         "Inspired By" to "/game-soundtracks/inspired-by",
+        "Anime Soundtracks" to "/game-soundtracks/anime",
     )
 
     // ---------- Helper scraping ----------
@@ -454,36 +606,9 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
         return enrichWithCovers(parseAlbumList(html, limit, skipFirst))
     }
 
-    /** Paginazione di Echo 1.0: Continuous carica le pagine una dopo l'altra */
-    private fun <T : Any> continuousPaged(
-        loader: suspend (page: Int) -> Pair<List<T>, Boolean>,
-    ): PagedData<T> = PagedData.Continuous { key ->
-        val page = key?.toIntOrNull() ?: 1
-        val (items, hasMore) = loader(page)
-        Page(items, if (hasMore) (page + 1).toString() else null)
-    }
-
-    /** Pagina "More" di una console/tipo: una sezione per ogni pagina del sito */
-    private fun albumsMoreFeed(path: String, cookie: String? = null): Feed<Shelf> =
-        Feed(emptyList()) {
-            continuousPaged<Shelf> { page ->
-                val url = if (page == 1) "$KHI$path" else "$KHI$path?page=$page"
-                val items = scrapeAlbumList(url, 30, cookie)
-                val shelves = if (items.isEmpty()) emptyList()
-                else listOf(
-                    Shelf.Lists.Items(
-                        id = "$path-p$page",
-                        title = if (page == 1) "Album" else "Pagina $page",
-                        list = items,
-                    )
-                )
-                shelves to (items.size >= 30)
-            }.toFeedData()
-        }
-
     private suspend fun albumsShelf(
         id: String, title: String, path: String,
-        preview: Int = 12, cookie: String? = null, paged: Boolean = false,
+        preview: Int = 12, cookie: String? = null,
     ): Shelf? {
         val albums = runCatching { scrapeAlbumList("$KHI$path", preview, cookie) }.getOrDefault(emptyList())
         if (albums.isEmpty()) return null   // sezione vuota o non raggiungibile → non mostrarla
@@ -491,105 +616,127 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
             id = id,
             title = title,
             list = albums,
-            more = if (paged) albumsMoreFeed(path, cookie) else null,
         )
     }
 
-    // ---------- CONSOLE (Top 12 + elenco paginato senza la Top 12) ----------
-
-    /** Le due sezioni di una console: "Top 12 X Albums" e l'elenco completo dal 13° album. */
-    private suspend fun consoleShelves(name: String, path: String): List<Shelf> {
-        val all = runCatching { scrapeAlbumList("$KHI$path", 12 + 30, null, 0) }.getOrDefault(emptyList())
-        if (all.isEmpty()) return emptyList()
-        val top12 = all.take(12)
-        val rest = all.drop(12).take(30)
-        val topShelf = Shelf.Lists.Items(
-            id = "console_${path.substringAfterLast('/')}_top",
-            title = "Top 12 $name Albums",
-            list = top12,
-        )
-        val restShelf = if (rest.isEmpty()) null
-        else Shelf.Lists.Items(
-            id = "console_${path.substringAfterLast('/')}_albums",
-            title = name,
-            list = rest,
-            more = consoleMoreFeed(path),
-        )
-        return listOfNotNull(topShelf, restShelf)
-    }
+    // ---------- CATEGORIE (Console / Tipo) — layout compatto come asmr.one ----------
 
     /**
-     * Pagine "More" di una console: chunk da 30 album DENTRO ogni pagina del sito,
-     * saltando la Top 12. La chiave è "paginaSito_offset" (es. "1_42", "2_0"):
-     * la prima pagina "More" riparte dal 43° album (dopo i 30 già mostrati).
+     * Griglia compatta di voci testuali (Shelf.Lists.Categories). Ogni voce è una
+     * Shelf.Category con feed on-demand: il contenuto viene caricato SOLO al tap,
+     * niente precaricamento di tutte le piattaforme.
      */
-    private fun consoleMoreFeed(path: String): Feed<Shelf> =
+    private fun platformCategories(id: String, title: String, entries: List<Pair<String, String>>): Shelf.Lists.Categories =
+        Shelf.Lists.Categories(
+            id = id,
+            title = title,
+            list = entries.map { (name, path) ->
+                Shelf.Category(
+                    id = "cat_${path.substringAfterLast('/')}",
+                    title = name,
+                    feed = platformFeed(path),
+                )
+            },
+            type = Shelf.Lists.Type.Grid,
+        )
+
+    /**
+     * Album di una pagina piattaforma/tipo: salta la "Top 12" del sito (primi 12
+     * link della pagina) e pagina le pagine successive con ?page=N.
+     */
+    private fun platformFeed(path: String): Feed<Shelf> =
         Feed(emptyList()) {
             PagedData.Continuous<Shelf> { key ->
-                val parts = key?.split("_") ?: listOf("1", "42")
-                val sitePage = parts[0].toIntOrNull() ?: 1
-                val offset = parts.getOrNull(1)?.toIntOrNull() ?: 0
+                val sitePage = key?.toIntOrNull() ?: 1
+                val skip = if (sitePage == 1) 12 else 0
                 val url = if (sitePage == 1) "$KHI$path" else "$KHI$path?page=$sitePage"
-                val items = scrapeAlbumList(url, 30, null, offset)
-                val next = when {
-                    items.size >= 30 -> "${sitePage}_${offset + 30}"
-                    items.isNotEmpty() -> "${sitePage + 1}_0"
-                    else -> null
-                }
-                val shelves = if (items.isEmpty()) emptyList<Shelf>()
+                val items = scrapeAlbumList(url, 30, null, skip)
+                val shelves = if (items.isEmpty()) emptyList()
                 else listOf(
                     Shelf.Lists.Items(
-                        id = "console-${path.substringAfterLast('/')}-p$sitePage-$offset",
-                        title = "Pagina",
+                        id = "pf-${path.substringAfterLast('/')}-p$sitePage",
+                        title = t("album"),
                         list = items,
                     )
                 )
+                val next = if (items.size + skip >= 30) (sitePage + 1).toString() else null
                 Page(shelves, next)
             }.toFeedData()
         }
 
-    /** Le 24 console caricate a gruppi di 8 (scroll infinito tra le console) */
-    private fun pagedConsoleShelves(): PagedData<Shelf> = continuousPaged { page ->
-        val start = (page - 1) * 8
-        val end = minOf(start + 8, platforms.size)
-        val shelves = platforms.subList(start, end).flatMap { (name, path) ->
-            runCatching { consoleShelves(name, path) }.getOrDefault(emptyList())
+    // ---------- TOP 100 / elenchi con "vedi tutto" ----------
+
+    /** Shelf di anteprima (20 voci) con feed "vedi tutto" paginato per la lista completa. */
+    private suspend fun topShelf(id: String, title: String, path: String, preview: Int = 20): Shelf? {
+        val albums = runCatching { scrapeAlbumList("$KHI$path", preview) }.getOrDefault(emptyList())
+        if (albums.isEmpty()) return null
+        return Shelf.Lists.Items(id = id, title = title, list = albums, more = listMoreFeed(path, preview))
+    }
+
+    /**
+     * "Vedi tutto" di una lista: continua dalla fine dell'anteprima, 100 album per
+     * pagina del sito (?page=N). Ferma la paginazione su pagina vuota o ripetuta.
+     */
+    private fun listMoreFeed(path: String, preview: Int): Feed<Shelf> {
+        var prevFirst: String? = null
+        return Feed(emptyList()) {
+            PagedData.Continuous<Shelf> { key ->
+                val sitePage = key?.toIntOrNull() ?: 1
+                val skip = if (sitePage == 1) preview else 0
+                val url = if (sitePage == 1) "$KHI$path" else "$KHI$path?page=$sitePage"
+                val items = scrapeAlbumList(url, 100, null, skip)
+                val first = items.firstOrNull()?.id
+                val shelves = if (items.isEmpty()) emptyList()
+                else listOf(
+                    Shelf.Lists.Items(
+                        id = "top-${path.substringAfterLast('/')}-p$sitePage",
+                        title = t("page"),
+                        list = items,
+                    )
+                )
+                val next = when {
+                    first == null || first == prevFirst -> null          // pagina vuota o ripetuta
+                    items.size + skip >= 100 -> { prevFirst = first; (sitePage + 1).toString() }
+                    else -> null
+                }
+                if (first != null) prevFirst = first
+                Page(shelves, next)
+            }.toFeedData()
         }
-        shelves to (end < platforms.size)
     }
 
     // ---------- HOME ----------
 
     override suspend fun loadHomeFeed(): Feed<Shelf> {
         val tabs = listOf(
-            Tab("home", "Home"),
-            Tab("top", "Top"),
-            Tab("console", "Console"),
-            Tab("tipo", "Tipo"),
+            Tab("home", t("home")),
+            Tab("top", t("top")),
+            Tab("console", t("console")),
+            Tab("tipo", t("tipo")),
         )
         return Feed(tabs) { tab ->
             when (tab?.id) {
                 "top" -> PagedData.Single {
                     listOfNotNull(
-                        albumsShelf("top40", "Top 40", "/top40", 40),
-                        albumsShelf("top100", "Top 100 All Time", "/all-time-top-100", 100),
-                        albumsShelf("top6m", "Top 100 Ultimi 6 Mesi", "/last-6-months-top-100", 100),
-                        albumsShelf("topnew", "Top 100 Nuovi", "/top-100-newly-added", 100),
-                        albumsShelf("viewed", "Attualmente Visti", "/currently-viewed", 100),
-                        albumsShelf("favs", "Più Preferiti", "/most-favorites", 100),
+                        topShelf("top40", "Top 40", "/top40"),
+                        topShelf("top100", t("top1000"), "/all-time-top-100"),
+                        topShelf("top6m", t("top6m"), "/last-6-months-top-100"),
+                        topShelf("topnew", t("topnew"), "/top-100-newly-added"),
+                        topShelf("viewed", t("viewed"), "/currently-viewed"),
+                        topShelf("favs", t("favs"), "/most-favorites"),
                     )
                 }.toFeedData()
-                "console" -> pagedConsoleShelves().toFeedData()
+                "console" -> PagedData.Single {
+                    listOf(platformCategories("console", t("console"), platforms))
+                }.toFeedData(buttons = Feed.Buttons(showSearch = true, showSort = false, showPlayAndShuffle = false))
                 "tipo" -> PagedData.Single {
-                    types.mapNotNull { (name, path) ->
-                        albumsShelf("type_${path.substringAfterLast('/')}", name, path, 12, paged = true)
-                    }
-                }.toFeedData()
+                    listOf(platformCategories("tipo", t("tipo"), types))
+                }.toFeedData(buttons = Feed.Buttons(showSearch = true, showSort = false, showPlayAndShuffle = false))
                 else -> PagedData.Single {
                     listOfNotNull(
-                        albumsShelf("latest", "Ultimi Arrivi", "/", 20),
-                        albumsShelf("topnew", "Top 100 Nuovi", "/top-100-newly-added", 50),
-                        albumsShelf("viewed", "Attualmente Visti", "/currently-viewed", 50),
+                        albumsShelf("latest", t("latest"), "/", 20),
+                        albumsShelf("topnew", t("topnew"), "/top-100-newly-added", 50),
+                        albumsShelf("viewed", t("viewed"), "/currently-viewed", 50),
                     )
                 }.toFeedData()
             }
@@ -710,7 +857,12 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
             val n = it.groupValues[1].trim()
             if (n.isNotBlank()) return n
         }
-        Regex("""href="[^"]*/user(?:s)?/([^"/?]+)""", RegexOption.IGNORE_CASE).find(mainHtml)?.let {
+        // Link XenForo ai profili: /members/{nome}.{id}/ (presente nel menu utente loggato)
+        Regex("""href="[^"]*/members/([^"/.]+)\.\d+/"""", RegexOption.IGNORE_CASE).find(mainHtml)?.let {
+            val n = it.groupValues[1].trim()
+            if (n.isNotBlank()) return n
+        }
+        Regex("""href="[^"]*/user(?:s)?/([^"/?]+)"""", RegexOption.IGNORE_CASE).find(mainHtml)?.let {
             val n = it.groupValues[1].trim()
             if (n.isNotBlank()) return n
         }
@@ -982,7 +1134,7 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
             site.forEach { merged.putIfAbsent(it.id, it) }
         }
         if (merged.isEmpty()) return null
-        return Shelf.Lists.Items(id = "lib_history", title = "Cronologia", list = merged.values.toList())
+        return Shelf.Lists.Items(id = "lib_history", title = t("history"), list = merged.values.toList())
     }
 
     // ---------- LIBRERIA ----------
@@ -996,13 +1148,13 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
             val favs = runCatching { refreshFavorites(c) }.getOrDefault(emptyList())
             val favsWithCovers = enrichWithCovers(favs)
             if (favsWithCovers.isNotEmpty()) {
-                shelves += Shelf.Lists.Items(id = "lib_favs", title = "I Miei Preferiti", list = favsWithCovers)
+                shelves += Shelf.Lists.Items(id = "lib_favs", title = t("my_favs"), list = favsWithCovers)
             }
         }
         // Cronologia: locale + sito in un'unica sezione, visibile anche senza login.
         historyShelf()?.let { shelves += it }
         if (c != null) {
-            albumsShelf("lib_uploads", "I Miei Album", "/cp/uploads", 30, c)?.let { shelves += it }
+            albumsShelf("lib_uploads", t("my_uploads"), "/cp/uploads", 30, c)?.let { shelves += it }
         }
         return Feed(emptyList()) {
             PagedData.Single { shelves }.toFeedData()
@@ -1017,7 +1169,7 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
             json.jsonArray.mapNotNull { it.jsonObject.toAlbumItem() }
         }.getOrDefault(emptyList())
         return if (albums.isEmpty()) emptyList()
-        else listOf(Shelf.Lists.Items(id = "latest", title = "Ultimi arrivi", list = albums))
+        else listOf(Shelf.Lists.Items(id = "latest", title = t("latest_search"), list = albums))
     }
 
     override suspend fun loadSearchFeed(query: String): Feed<Shelf> = withContext(Dispatchers.Default) {
@@ -1037,7 +1189,7 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
         val results = if (albums.isNotEmpty()) albums else FuzzyIndex.search(query)
 
         val shelves = if (results.isEmpty()) emptyList()
-        else listOf(Shelf.Lists.Items(id = "albums", title = "Album", list = results))
+        else listOf(Shelf.Lists.Items(id = "albums", title = t("album"), list = results))
         shelves.toFeed()
     }
 
@@ -1077,7 +1229,8 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
     override suspend fun loadStreamableMedia(
         streamable: Streamable, isDownload: Boolean,
     ): Streamable.Media {
-        val decoded = URLDecoder.decode(streamable.id, "UTF-8")
+        // Normalizza l'id (decodifica doppia: alcuni URL arrivano già percent-encoded).
+        val decoded = decodeAll(streamable.id)
         val isFlac = decoded.endsWith("#flac")
         val pageUrl = if (isFlac) decoded.removeSuffix("#flac") else decoded
         val cacheKey = if (isFlac) "$pageUrl#flac" else pageUrl
@@ -1086,7 +1239,9 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
         }.getOrElse {
             if (isFlac) resolveAudio(pageUrl, "mp3") else throw it
         }.also { audioCache[cacheKey] = it }
-        return downloadUrl(direct).toServerMedia()
+        // Il link diretto va decodificato PRIMA del proxy, altrimenti il mirror
+        // riceve un URL con doppia codifica (%2520) e il download fallisce.
+        return downloadUrl(decodeAll(direct)).toServerMedia()
     }
 
     override suspend fun loadFeed(track: Track): Feed<Shelf> = emptyList<Shelf>().toFeed()
