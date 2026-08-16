@@ -97,17 +97,18 @@ class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Al
     private var songAddParam2: String = "songid"
     // Combinazioni (endpoint, nome param playlist, nome param traccia) da provare:
     // il JS del sito è impacchettato, quindi proviamo finché il server risponde "1".
-    private val songAddCandidates = listOf(
-        "song_add" to ("playlistid" to "songid"),
-        "song_add" to ("g" to "s"),
-        "add_song" to ("playlistid" to "songid"),
-        "add_song" to ("g" to "s"),
-        "song_add_to" to ("playlistid" to "songid"),
-        "add_track" to ("playlistid" to "songid"),
-        "playlist_add" to ("playlistid" to "songid"),
-        "push" to ("g" to "s"),
-        "popup_list" to ("g" to "s"),
-    )
+private val songAddCandidates = listOf(
+    "popup_toggle" to ("playlistid" to "songid"),   // ✅ endpoint reale (verificato dal Network del browser)
+    "song_add" to ("playlistid" to "songid"),
+    "song_add" to ("g" to "s"),
+    "add_song" to ("playlistid" to "songid"),
+    "add_song" to ("g" to "s"),
+    "song_add_to" to ("playlistid" to "songid"),
+    "add_track" to ("playlistid" to "songid"),
+    "playlist_add" to ("playlistid" to "songid"),
+    "push" to ("g" to "s"),
+    "popup_list" to ("g" to "s"),
+)
 
     // ---------- Cronologia locale (volatile, in memoria) ----------
     private val localHistory = LinkedHashMap<String, Pair<Long, Album>>()   // id -> (timestamp, album)
