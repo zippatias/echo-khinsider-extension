@@ -1131,8 +1131,8 @@ private val songAddCandidates = listOf(
      * Se il sito non paginasse, il comportamento resta identico a prima.
      * Restituisce la lista completa per la sezione Libreria.
      */
-    private suspend fun refreshFavorites(c: String): List<Album> {
-        synchronized(favoriteSlugs) { if (favoritesLoaded) return cachedFavorites.toList() }
+    private suspend fun refreshFavorites(c: String, force: Boolean = false): List<Album> {
+    synchronized(favoriteSlugs) { if (!force && favoritesLoaded) return cachedFavorites.toList() }
 
         val allAlbums = LinkedHashMap<String, Album>()
         val slugToId = mutableMapOf<String, String>()
@@ -1640,7 +1640,7 @@ private val songAddCandidates = listOf(
         if (c != null) {
             // I preferiti vengono scaricati una volta sola e riusati sia per la
             // sezione sia per lo stato di cuore/salvataggio (niente doppia richiesta).
-            val favs = runCatching { refreshFavorites(c) }.getOrDefault(emptyList())
+            val favs = runCatching { refreshFavorites(c, force = true) }.getOrDefault(emptyList())
             val favsWithCovers = enrichWithCovers(favs)
             if (favsWithCovers.isNotEmpty()) {
                 shelves += Shelf.Lists.Items(id = "lib_favs", title = t("my_favs"), list = favsWithCovers)
@@ -1650,7 +1650,7 @@ private val songAddCandidates = listOf(
         historyShelf()?.let { shelves += it }
         if (c != null) {
             albumsShelf("lib_uploads", t("my_uploads"), "/cp/uploads", 30, c)?.let { shelves += it }
-            val playlists = runCatching { ensurePlaylists(c) }.getOrDefault(emptyList())
+            val playlists = runCatching { refreshPlaylists(c) }.getOrDefault(emptyList())
             if (playlists.isNotEmpty()) {
                 shelves += Shelf.Lists.Items(id = "lib_playlists", title = t("playlists"), list = playlists)
             }
