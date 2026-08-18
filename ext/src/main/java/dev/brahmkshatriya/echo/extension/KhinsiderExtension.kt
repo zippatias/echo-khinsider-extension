@@ -50,6 +50,7 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import kotlin.math.absoluteValue
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -397,7 +398,7 @@ private val songAddCandidates = listOf(
         val regex = Regex("href=[\"']([^\"']+\\.$ext)[\"']", RegexOption.IGNORE_CASE)
         val html = withRetry {
             runCatching { getText(downloadUrl(pageUrl)) }.getOrElse {
-                val direct = khinsiderGet("$KHI$pageUrl")   // pagina traccia sul sito (fallback)
+                val direct = khinsiderGet(khiUrl(pageUrl))   // pagina traccia sul sito (fallback)
                 if (direct.isBlank()) throw Exception("Pagina download vuota per $pageUrl")
                 direct
             }
@@ -483,6 +484,22 @@ private val songAddCandidates = listOf(
     // ---------- LE SEZIONI DEL SITO ----------
 
     private val KHI = "https://downloads.khinsider.com"
+
+    /**
+     * Costruisce un URL assoluto verso il sito a partire da un path DECODIFICATO
+     * (caratteri letterali, es. "#", spazi). A differenza della concatenazione
+     * grezza "$KHI$path", ogni segmento viene qui codificato correttamente da
+     * OkHttp una sola volta: niente più troncamento sul "#" (interpretato come
+     * fragment da Request.Builder().url()) e niente doppia codifica.
+     * Se il path è già un URL assoluto, viene restituito invariato — questo
+     * evita "https://downloads.khinsider.comhttps://...".
+     */
+    private fun khiUrl(rawPath: String): String {
+        if (rawPath.startsWith("http")) return rawPath
+        val builder = KHI.toHttpUrl().newBuilder()
+        rawPath.split("/").filter { it.isNotEmpty() }.forEach { builder.addPathSegment(it) }
+        return builder.build().toString()
+    }
 
     /** Lista completa delle piattaforme (fonte: /console-list, 65 voci). */
     private val platforms = listOf(
@@ -1186,7 +1203,7 @@ private val songAddCandidates = listOf(
         synchronized(albumIdCache) { albumIdCache[albumId]?.let { return it } }
         synchronized(slugToAlbumId) { slugToAlbumId[albumId]?.let { return it } }
 
-        val html = runCatching { khinsiderGet("$KHI$albumId", c) }.getOrDefault("")
+        val html = runCatching { khinsiderGet(khiUrl(albumId), c) }.getOrDefault("")
         if (html.contains(">Log In") || html.contains("/forums/login")) throw ClientException.LoginRequired()
         val id = findAlbumIdInPage(html)
             ?: throw Exception("albumid non trovato per $albumId: il sito potrebbe aver cambiato struttura")
@@ -1555,7 +1572,7 @@ private val songAddCandidates = listOf(
         // Album dalla traccia, o derivato dall'URL se il modello non lo porta.
         val albumId = track.album?.id
             ?: "/game-soundtracks/album/${key.removePrefix("/game-soundtracks/album/").substringBefore('/')}"
-        val html = runCatching { khinsiderGet("$KHI$albumId", c) }.getOrDefault("")
+        val html = runCatching { khinsiderGet(khiUrl(albumId), c) }.getOrDefault("")
         val entries = parseAlbumSongIds(html)   // (pathNormalizzato, songid) in ordine di riga
         val sid = entries.firstOrNull { it.first == key }?.second
             ?: track.albumOrderNumber?.let { n -> entries.getOrNull(n.toInt() - 1)?.second }
@@ -1720,7 +1737,7 @@ private val songAddCandidates = listOf(
         if (mirror.isNotEmpty()) return mirror.toFeed()
         // Fallback: mirror vuoto/assente -> tracce dalla pagina album del sito,
         // così l'album si apre SEMPRE con le sue tracce (mai "0 tracce").
-        val html = runCatching { khinsiderGet("$KHI${album.id}") }.getOrDefault("")
+        val html = runCatching { khinsiderGet(khiUrl(album.id)) }.getOrDefault("")
         return parseAlbumPageTracks(html, album).toFeed()
     }
 
