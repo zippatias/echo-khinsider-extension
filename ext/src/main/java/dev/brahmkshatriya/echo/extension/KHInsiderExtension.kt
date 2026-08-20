@@ -1797,37 +1797,31 @@ private val songAddCandidates = listOf(
     override suspend fun loadTrack(track: Track, isDownload: Boolean): Track = track
 
     override suspend fun loadStreamableMedia(
-        streamable: Streamable, isDownload: Boolean,
-    ): Streamable.Media {
-        // Normalizza l'id (decodifica doppia: il sito emette URL con %2520).
-        val decoded = decodeAll(streamable.id)
-        val isFlac = decoded.endsWith("#flac")
-        val pageUrl = if (isFlac) decoded.removeSuffix("#flac") else decoded
-        val cacheKey = if (isFlac) "$pageUrl#flac" else pageUrl
+    streamable: Streamable, isDownload: Boolean,
+): Streamable.Media {
+    // Normalizza l'id (decodifica doppia: il sito emette URL con %2520).
+    val decoded = decodeAll(streamable.id)
+    val isFlac = decoded.endsWith("#flac")
+    val pageUrl = if (isFlac) decoded.removeSuffix("#flac") else decoded
+    val cacheKey = if (isFlac) "$pageUrl#flac" else pageUrl
 
-        println("🎵 loadStreamableMedia: pageUrl = $pageUrl")
-        println("🎵 loadStreamableMedia: isFlac = $isFlac")
+    println("🎵 loadStreamableMedia: pageUrl = $pageUrl")
+    println("🎵 loadStreamableMedia: isFlac = $isFlac")
 
-        val direct = audioCache[cacheKey] ?: runCatching {
-    resolveAudio(pageUrl, if (isFlac) "flac" else "mp3")
-}.getOrElse {
-    if (isFlac) resolveAudio(pageUrl, "mp3") else throw it
-}.also { audioCache[cacheKey] = it }
+    val direct = audioCache[cacheKey] ?: runCatching {
+        resolveAudio(pageUrl, if (isFlac) "flac" else "mp3")
+    }.getOrElse {
+        if (isFlac) resolveAudio(pageUrl, "mp3") else throw it
+    }.also { audioCache[cacheKey] = it }
 
-// Non decodificare! Usa l'URL così com'è (già doppiamente codificato)
-val finalUrl = downloadUrl(direct)
+    println("🎵 loadStreamableMedia: direct = $direct")
 
-        println("🎵 loadStreamableMedia: direct = $direct")
+    // NON decodificare! Usa l'URL così com'è (già doppiamente codificato)
+    val finalUrl = downloadUrl(direct)
+    println("🎵 loadStreamableMedia: finalUrl = $finalUrl")
 
-        // Il link diretto va decodificato PRIMA del proxy, altrimenti il mirror
-        // riceve un URL con doppia codifica (%2520) e il download fallisce.
-        println("🎵 loadStreamableMedia: decodedDirect = $decodedDirect")
-
-        val finalUrl = downloadUrl(decodedDirect)
-        println("🎵 loadStreamableMedia: finalUrl = $finalUrl")
-
-        return finalUrl.toServerMedia()
-    }
+    return finalUrl.toServerMedia()
+}
 
     override suspend fun loadFeed(track: Track): Feed<Shelf> = emptyList<Shelf>().toFeed()
 }
