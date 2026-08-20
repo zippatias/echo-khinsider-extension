@@ -349,8 +349,14 @@ private val songAddCandidates = listOf(
         return apiUrl("/api/image", mapOf("url" to target))
     }
 
-    private fun downloadUrl(target: String): String =
-        apiUrl("/api/download", mapOf("url" to target))
+    private fun downloadUrl(target: String): String {
+    return baseUrl.toHttpUrl().newBuilder()
+        .addPathSegment("api")
+        .addPathSegment("download")
+        .addEncodedQueryParameter("url", target)
+        .build()
+        .toString()
+}
 
     // ---------- Helper JSON ----------
 
@@ -1803,16 +1809,18 @@ private val songAddCandidates = listOf(
         println("🎵 loadStreamableMedia: isFlac = $isFlac")
 
         val direct = audioCache[cacheKey] ?: runCatching {
-            resolveAudio(pageUrl, if (isFlac) "flac" else "mp3")
-        }.getOrElse {
-            if (isFlac) resolveAudio(pageUrl, "mp3") else throw it
-        }.also { audioCache[cacheKey] = it }
+    resolveAudio(pageUrl, if (isFlac) "flac" else "mp3")
+}.getOrElse {
+    if (isFlac) resolveAudio(pageUrl, "mp3") else throw it
+}.also { audioCache[cacheKey] = it }
+
+// Non decodificare! Usa l'URL così com'è (già doppiamente codificato)
+val finalUrl = downloadUrl(direct)
 
         println("🎵 loadStreamableMedia: direct = $direct")
 
         // Il link diretto va decodificato PRIMA del proxy, altrimenti il mirror
         // riceve un URL con doppia codifica (%2520) e il download fallisce.
-        val decodedDirect = decodeAll(direct)
         println("🎵 loadStreamableMedia: decodedDirect = $decodedDirect")
 
         val finalUrl = downloadUrl(decodedDirect)
