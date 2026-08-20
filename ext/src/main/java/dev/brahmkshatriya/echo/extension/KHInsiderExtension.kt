@@ -404,10 +404,16 @@ private val songAddCandidates = listOf(
             }
         }
         val candidates = regex.findAll(html).map { it.groupValues[1] }.toList()
+        println("🔍 resolveAudio: candidates trovati = $candidates")
+
         val link = candidates.firstOrNull { it.contains("vgmtreasurechest.com") }
             ?: candidates.firstOrNull()
             ?: throw Exception("Link $ext non trovato nella pagina $pageUrl (HTTP ok ma struttura cambiata?)")
-        return if (link.startsWith("http")) link else "https://downloads.khinsider.com$link"
+        println("🔍 resolveAudio: link scelto = $link")
+
+        val result = if (link.startsWith("http")) link else "https://downloads.khinsider.com$link"
+        println("🔍 resolveAudio: risultato restituito = $result")
+        return result
     }
 
     // ---------- Conversione modelli ----------
@@ -495,10 +501,16 @@ private val songAddCandidates = listOf(
      * evita "https://downloads.khinsider.comhttps://...".
      */
     private fun khiUrl(rawPath: String): String {
-        if (rawPath.startsWith("http")) return rawPath
+        println("🔗 khiUrl: rawPath = $rawPath")
+        if (rawPath.startsWith("http")) {
+            println("🔗 khiUrl: rawPath è già assoluto, restituisco invariato")
+            return rawPath
+        }
         val builder = KHI.toHttpUrl().newBuilder()
         rawPath.split("/").filter { it.isNotEmpty() }.forEach { builder.addPathSegment(it) }
-        return builder.build().toString()
+        val result = builder.build().toString()
+        println("🔗 khiUrl: risultato = $result")
+        return result
     }
 
     /** Lista completa delle piattaforme (fonte: /console-list, 65 voci). */
@@ -1786,14 +1798,27 @@ private val songAddCandidates = listOf(
         val isFlac = decoded.endsWith("#flac")
         val pageUrl = if (isFlac) decoded.removeSuffix("#flac") else decoded
         val cacheKey = if (isFlac) "$pageUrl#flac" else pageUrl
+
+        println("🎵 loadStreamableMedia: pageUrl = $pageUrl")
+        println("🎵 loadStreamableMedia: isFlac = $isFlac")
+
         val direct = audioCache[cacheKey] ?: runCatching {
             resolveAudio(pageUrl, if (isFlac) "flac" else "mp3")
         }.getOrElse {
             if (isFlac) resolveAudio(pageUrl, "mp3") else throw it
         }.also { audioCache[cacheKey] = it }
+
+        println("🎵 loadStreamableMedia: direct = $direct")
+
         // Il link diretto va decodificato PRIMA del proxy, altrimenti il mirror
         // riceve un URL con doppia codifica (%2520) e il download fallisce.
-        return downloadUrl(decodeAll(direct)).toServerMedia()
+        val decodedDirect = decodeAll(direct)
+        println("🎵 loadStreamableMedia: decodedDirect = $decodedDirect")
+
+        val finalUrl = downloadUrl(decodedDirect)
+        println("🎵 loadStreamableMedia: finalUrl = $finalUrl")
+
+        return finalUrl.toServerMedia()
     }
 
     override suspend fun loadFeed(track: Track): Feed<Shelf> = emptyList<Shelf>().toFeed()
