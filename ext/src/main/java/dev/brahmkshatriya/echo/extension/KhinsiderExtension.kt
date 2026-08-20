@@ -59,7 +59,7 @@ import java.net.URLDecoder
 import java.net.URLEncoder
 import java.util.concurrent.TimeUnit
 
-class KhinsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, AlbumClient, TrackClient, LibraryFeedClient, LoginClient.CustomInput, LikeClient, SaveClient, ShareClient, PlaylistClient, PlaylistEditClient, PlaylistEditPrivacyClient {
+class KHInsiderExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, AlbumClient, TrackClient, LibraryFeedClient, LoginClient.CustomInput, LikeClient, SaveClient, ShareClient, PlaylistClient, PlaylistEditClient, PlaylistEditPrivacyClient {
 
     // Timeout generosi: le pagine di browse arrivano a 300KB+ (es. Android, 327KB)
     // e con i timeout di default OkHttp (10s) scattava il timeout -> "vuoto" sistematico.
@@ -186,7 +186,7 @@ private val songAddCandidates = listOf(
             "viewed" to "Currently Viewed", "favs" to "Most Favorites",
             "my_favs" to "My Favorites", "history" to "History", "my_uploads" to "My Albums",
             "playlists" to "My Playlists", "tracks" to "tracks", "login_ok" to "Logged in",
-            "login_user" to "Username", "login_pass" to "Password", "login_label" to "Khinsider account",
+            "login_user" to "Username", "login_pass" to "Password", "login_label" to "KHInsider account",
             "album" to "Album", "page" to "Page", "latest_search" to "Latest additions",
             "year" to "Year",
             "lang_label" to "Interface language",
