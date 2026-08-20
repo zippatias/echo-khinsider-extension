@@ -400,27 +400,29 @@ private val songAddCandidates = listOf(
      * Con retry e messaggio diagnostico (URL + status) in caso di fallimento.
      */
     private suspend fun resolveAudio(pageUrl: String, format: String = "mp3"): String {
-        val ext = if (format.equals("flac", true)) "flac" else "mp3"
-        val regex = Regex("href=[\"']([^\"']+\\.$ext)[\"']", RegexOption.IGNORE_CASE)
-        val html = withRetry {
-            runCatching { getText(downloadUrl(pageUrl)) }.getOrElse {
-                val direct = khinsiderGet(khiUrl(pageUrl))   // pagina traccia sul sito (fallback)
-                if (direct.isBlank()) throw Exception("Pagina download vuota per $pageUrl")
-                direct
-            }
+    val ext = if (format.equals("flac", true)) "flac" else "mp3"
+    val regex = Regex("href=[\"']([^\"']+\\.$ext)[\"']", RegexOption.IGNORE_CASE)
+    val html = withRetry {
+        runCatching { getText(downloadUrl(pageUrl)) }.getOrElse {
+            // Fallback: usa l'URL così com'è (già doppiamente codificato) direttamente sul sito
+            val directUrl = "$KHI$pageUrl"
+            val fallbackHtml = khinsiderGet(directUrl)
+            if (fallbackHtml.isBlank()) throw Exception("Pagina download vuota per $pageUrl")
+            fallbackHtml
         }
-        val candidates = regex.findAll(html).map { it.groupValues[1] }.toList()
-        println("🔍 resolveAudio: candidates trovati = $candidates")
-
-        val link = candidates.firstOrNull { it.contains("vgmtreasurechest.com") }
-            ?: candidates.firstOrNull()
-            ?: throw Exception("Link $ext non trovato nella pagina $pageUrl (HTTP ok ma struttura cambiata?)")
-        println("🔍 resolveAudio: link scelto = $link")
-
-        val result = if (link.startsWith("http")) link else "https://downloads.khinsider.com$link"
-        println("🔍 resolveAudio: risultato restituito = $result")
-        return result
     }
+    val candidates = regex.findAll(html).map { it.groupValues[1] }.toList()
+    println("🔍 resolveAudio: candidates trovati = $candidates")
+
+    val link = candidates.firstOrNull { it.contains("vgmtreasurechest.com") }
+        ?: candidates.firstOrNull()
+        ?: throw Exception("Link $ext non trovato nella pagina $pageUrl (HTTP ok ma struttura cambiata?)")
+    println("🔍 resolveAudio: link scelto = $link")
+
+    val result = if (link.startsWith("http")) link else "https://downloads.khinsider.com$link"
+    println("🔍 resolveAudio: risultato restituito = $result")
+    return result
+}
 
     // ---------- Conversione modelli ----------
 
@@ -1799,11 +1801,10 @@ private val songAddCandidates = listOf(
     override suspend fun loadStreamableMedia(
     streamable: Streamable, isDownload: Boolean,
 ): Streamable.Media {
-    // Normalizza l'id (decodifica doppia: il sito emette URL con %2520).
-    val decoded = decodeAll(streamable.id)
-    val isFlac = decoded.endsWith("#flac")
-    val pageUrl = if (isFlac) decoded.removeSuffix("#flac") else decoded
-    val cacheKey = if (isFlac) "$pageUrl#flac" else pageUrl
+    val id = streamable.id
+    val isFlac = id.endsWith("#flac")
+    val pageUrl = if (isFlac) id.removeSuffix("#flac") else id
+    val cacheKey = id
 
     println("🎵 loadStreamableMedia: pageUrl = $pageUrl")
     println("🎵 loadStreamableMedia: isFlac = $isFlac")
