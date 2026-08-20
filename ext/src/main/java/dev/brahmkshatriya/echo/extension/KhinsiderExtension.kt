@@ -1339,7 +1339,7 @@ private val songAddCandidates = listOf(
 
     override suspend fun loadTracks(playlist: Playlist): Feed<Track> {
         val c = cookie ?: throw ClientException.LoginRequired()
-        val html = runCatching { khinsiderGet("$KHI${playlist.id}", c) }.getOrDefault("")
+        val html = runCatching { khinsiderGet(khiUrl(playlist.id), c) }.getOrDefault("")
         return parsePlaylistTracks(html, playlist).toFeed()
     }
 
